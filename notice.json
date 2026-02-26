@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "label": "📢 公告 (26.02.25)",
-  "message": "脚本热更新机制+内核创意工坊近期即将上线，请大家在看到公告后及时同步仓库，以便接收后续脚本更新！",
+  "label": "📢 公告 (26.02.26)",
+  "message": "如果你看到了这条公告，说明你的仓库该同步了 (目前通知链接地址已更新)",
   "color": "orange",
   "labelColor": "black",
   "style": "for-the-badge"
