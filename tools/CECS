@@ -1,0 +1,429 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+CCache ECS (Effective Configuration State) Wrapper for Linux Kernel Compilation
+By GitHub@cctv18
+用于解决 Linux 内核编译中因 autoconf.h 变化导致 ccache 大面积失效的问题。
+
+用法:
+  在 make 时将本脚本作为编译器前置包装器调用 (gcc/clang) ：
+  make CC="/path/to/CECS clang"
+  
+查看统计日志:
+  /path/to/CECS --ecs-summary
+"""
+
+import os
+import sys
+import re
+import json
+import hashlib
+import subprocess
+import logging
+from pathlib import Path
+
+# ================= 配置区 =================
+# ECS 独立缓存目录，默认放在 ccache 缓存目录下，避免污染
+CCACHE_DIR = os.environ.get("CCACHE_DIR", os.path.expanduser("~/.ccache"))
+ECS_DIR = Path(CCACHE_DIR) / "ecs_cache"
+AUTOCONF_STORE_DIR = ECS_DIR / "autoconf_store"
+DEPS_DIR = ECS_DIR / "deps"
+
+# 移除全局静态的 LOG_FILE 和 logging.basicConfig 配置。
+# 现将其推迟到动态识别出内核编译输出目录（如 out/）之后，再行配置，以满足日志存放在源码编译输出目录的需求。
+
+# 初始化目录
+for d in [AUTOCONF_STORE_DIR, DEPS_DIR]:
+    d.mkdir(parents=True, exist_ok=True)
+
+# 匹配 CONFIG_ 宏的正则（快速词法扫描）
+CONFIG_REGEX = re.compile(r'\bCONFIG_[A-Za-z0-9_]+\b')
+# ==========================================
+
+def get_file_md5(filepath):
+    """计算文件MD5"""
+    if not os.path.exists(filepath):
+        return None
+    hasher = hashlib.md5()
+    with open(filepath, 'rb') as f:
+        hasher.update(f.read())
+    return hasher.hexdigest()
+
+def parse_autoconf(filepath):
+    """解析 autoconf.h，提取所有 CONFIG_ 的值，返回字典"""
+    config_dict = {}
+    if not os.path.exists(filepath):
+        return config_dict
+    with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith("#define CONFIG_"):
+                parts = line.split(None, 2)
+                if len(parts) >= 3:
+                    config_dict[parts[1]] = parts[2]
+                elif len(parts) == 2:
+                    config_dict[parts[1]] = "1"
+    return config_dict
+
+def extract_configs_from_files(file_paths):
+    """扫描文件列表，提取所有出现过的 CONFIG_ 宏集合"""
+    used_configs = set()
+    for fp in file_paths:
+        if not os.path.exists(fp):
+            continue
+        with open(fp, 'r', encoding='utf-8', errors='ignore') as f:
+            # 读取整个文件并进行正则扫描，性能极高
+            content = f.read()
+            used_configs.update(CONFIG_REGEX.findall(content))
+    return sorted(list(used_configs))
+
+def compute_ecs_hash(used_configs, autoconf_dict):
+    """根据依赖的宏集合和当前的 autoconf 字典，计算有效配置状态哈希 (ECS Hash)"""
+    state_str = ""
+    for cfg in used_configs:
+        # 如果宏存在，记录其值；如果不存在，记录为 undefined
+        val = autoconf_dict.get(cfg, "UNDEFINED")
+        state_str += f"{cfg}={val};"
+    return hashlib.md5(state_str.encode('utf-8')).hexdigest()
+
+def parse_d_file(d_filepath):
+    """解析编译器生成的 .d 依赖文件，获取所有依赖头文件路径"""
+    if not os.path.exists(d_filepath):
+        return []
+    deps = []
+    with open(d_filepath, 'r', encoding='utf-8', errors='ignore') as f:
+        content = f.read()
+        # 移除续行符并按空白字符分割
+        content = content.replace('\\\n', ' ')
+        tokens = content.split()
+        # 第一个 token 通常是 target.o: ，跳过
+        for token in tokens[1:]:
+            if token != ':' and os.path.exists(token):
+                deps.append(token)
+    return deps
+
+def main():
+    # 统计汇总模式
+    if len(sys.argv) == 2 and sys.argv[1] == '--ecs-summary':
+        print_summary()
+        return 0
+
+    # 获取原始编译参数
+    orig_args = sys.argv[1:]
+    if not orig_args:
+        return 0
+
+    # 引入路径缓存机制与虚拟 Include 目录解析
+    # 脚本会在第一次找到路径后存入缓存文件，后续直接读取避免重复扫描 IO
+    src_file = None
+    autoconf_path = None
+    d_file_path = None
+    inc_dirs = []
+    out_dir = "."
+    
+    # 使用当前工作目录作为缓存键，避免多工程同时编译导致的路径污染
+    pwd_hash = hashlib.md5(os.getcwd().encode('utf-8')).hexdigest()
+    path_cache_file = ECS_DIR / f"path_cache_{pwd_hash}.json"
+    
+    # 首先尝试从缓存快速加载上次识别成功的路径
+    if path_cache_file.exists():
+        try:
+            with open(path_cache_file, 'r') as f:
+                cache_data = json.load(f)
+                autoconf_path = cache_data.get("autoconf_path")
+                out_dir = cache_data.get("out_dir", ".")
+        except:
+            pass
+            
+    # 解析编译器参数
+    i = 0
+    while i < len(orig_args):
+        arg = orig_args[i]
+        if arg.endswith('.c') or arg.endswith('.S'):
+            src_file = arg
+        
+        if arg == '-I' and i + 1 < len(orig_args):
+            inc_dirs.append(orig_args[i+1])
+        elif arg.startswith('-I'):
+            inc_dirs.append(arg[2:])
+            
+        if arg == '-include' and i + 1 < len(orig_args) and 'generated/autoconf.h' in orig_args[i+1]:
+            autoconf_path = orig_args[i+1]
+        elif arg.startswith('-include') and 'generated/autoconf.h' in arg:
+            autoconf_path = arg[len('-include'):].strip()
+        
+        # 尝试捕获 -Wp,-MD,.xxx.o.d 或者 -MD 参数，用于后续依赖提取
+        if arg.startswith('-Wp,-MD,'):
+            d_file_path = arg.split(',')[2]
+        elif arg == '-MD' and i + 1 < len(orig_args):
+            pass 
+        i += 1
+
+    # 如果缓存没命中且命令行没明文指定，执行深度嗅探
+    if not autoconf_path:
+        for inc in inc_dirs:
+            candidate = os.path.join(inc, 'generated', 'autoconf.h')
+            if os.path.exists(candidate):
+                autoconf_path = candidate
+                break
+        
+        # 针对常见输出目录特征进行回退匹配
+        if not autoconf_path:
+            fb1 = "out/include/generated/autoconf.h"
+            fb2 = "include/generated/autoconf.h"
+            if os.path.exists(fb1): autoconf_path = fb1
+            elif os.path.exists(fb2): autoconf_path = fb2
+
+    # 如果是首次发现，推导输出目录并保存至缓存，供后续所有的源文件编译秒读
+    if autoconf_path and not path_cache_file.exists():
+        if "include/generated/autoconf.h" in autoconf_path:
+            out_dir = autoconf_path.split("include/generated/autoconf.h")[0]
+            if not out_dir: out_dir = "."
+        else:
+            out_dir = "."
+        try:
+            with open(path_cache_file, 'w') as f:
+                json.dump({"autoconf_path": autoconf_path, "out_dir": out_dir}, f)
+        except:
+            pass
+
+    # 日志输出路径移步至输出目录，同时配置 JSON 字典输出
+    log_file_path = os.path.join(out_dir, "cecs.log")
+    if not logging.getLogger().handlers:
+        logging.basicConfig(
+            filename=log_file_path,
+            level=logging.INFO,
+            # 将 message 配置为直接接收 JSON 字符串
+            format='{"time": "%(asctime)s", "event": %(message)s}'
+        )
+
+    # 如果不是典型的内核目标编译，直接放行给 ccache 处理
+    if not src_file or not autoconf_path or not os.path.exists(autoconf_path):
+        return run_ccache(orig_args)
+
+    src_abs_path = os.path.abspath(src_file)
+    src_md5 = hashlib.md5(src_abs_path.encode('utf-8')).hexdigest()
+    deps_json_path = DEPS_DIR / f"{src_md5}.json"
+    
+    # 计算当前 C 源码的真实文件内容 Hash
+    src_content_hash = get_file_md5(src_abs_path)
+
+    # 2. 载入并计算当前 autoconf.h
+    current_auto_hash = get_file_md5(autoconf_path)
+    
+    # 构建针对该版本 Hash 的虚拟 Include 目录树
+    store_inc_dir = AUTOCONF_STORE_DIR / current_auto_hash
+    stored_auto_path = store_inc_dir / "generated" / "autoconf.h"
+
+    # 保存本次 autoconf.h 的明文副本，置于对应的虚拟目录内
+    if not stored_auto_path.exists():
+        stored_auto_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(autoconf_path, 'rb') as f_src, open(stored_auto_path, 'wb') as f_dst:
+            f_dst.write(f_src.read())
+
+    # 3. 读取该文件的历史依赖记录
+    deps_info = None
+    src_changed_flag = False
+    if deps_json_path.exists():
+        try:
+            with open(deps_json_path, 'r') as f:
+                deps_info = json.load(f)
+            # 防范源码篡改，如果源码内容变化，立刻作废过期依赖，强制进入 LEARNING
+            if deps_info.get("src_content_hash") != src_content_hash:
+                deps_info = None
+                src_changed_flag = True
+        except:
+            pass
+
+    action_taken = "UNKNOWN"
+    run_with_args = orig_args.copy()
+    auto_changed_flag = False
+
+    # 4. 核心判定逻辑
+    changed_macros = []  # 配置变化追踪列表，用于记录导致 Miss 的 CONFIG 宏
+    if deps_info and deps_info.get("last_auto_hash") == current_auto_hash:
+        # 【情况 A：直接命中（Fast Path）】
+        # autoconf.h 从上次编译该文件到现在完全没有变化
+        action_taken = "FAST_PATH_UNCHANGED"
+        # 维持原样，全部操作交给 ccache
+    
+    elif deps_info and deps_info.get("last_auto_hash") != current_auto_hash:
+        auto_changed_flag = True
+        # 【情况 B：内核配置发生变化，需进行 ECS 校验】
+        curr_dict = parse_autoconf(autoconf_path)
+        new_ecs_hash = compute_ecs_hash(deps_info["configs"], curr_dict)
+
+        # 引入 History Map 判定逻辑
+        history_map = deps_info.get("history", {})
+        
+        # 在 History Map 中寻找当前 ECS Hash 对应的历史 autoconf_hash
+        if new_ecs_hash in history_map:
+            anchor_auto_hash = history_map[new_ecs_hash]
+            
+            # 使用虚拟目录劫持 -I，即使对应不同版本也能精确指定路径
+            anchor_inc_dir = AUTOCONF_STORE_DIR / anchor_auto_hash
+            anchor_auto_path = anchor_inc_dir / "generated" / "autoconf.h"
+            
+            if anchor_auto_path.exists():
+                # 【情况 B-1：ECS 校验匹配历史状态，成功命中】
+                action_taken = "ECS_HIT_TRICK"
+                # 核心黑科技：通过向参数最前列追加 -I，将编译器的头文件搜索重定向到目标历史缓存
+                # insert(1, ...)：确保 -I 插入在编译器名称(如 clang)之后
+                run_with_args.insert(1, str(anchor_inc_dir))
+                run_with_args.insert(1, "-I")
+                # 注意：这里不更新 deps.json，让它继续锚定旧版 autoconf，确保后续编译继续 Trick 命中
+            else:
+                action_taken = "ECS_MISS_OLD_AUTOCONF_LOST"
+        else:
+            # 【情况 B-2：ECS 校验未通过，这是一个全新的配置状态组合/源码受到配置变化影响，无法命中】
+            action_taken = "ECS_MISS_AFFECTED"
+            
+            # 追溯并提取究竟是 used_configs 中的哪个宏发生了实质性变化
+            try:
+                old_auto_hash = deps_info.get("last_auto_hash")
+                old_auto_path = AUTOCONF_STORE_DIR / old_auto_hash / "generated" / "autoconf.h"
+                if old_auto_path.exists():
+                    old_dict = parse_autoconf(old_auto_path)
+                    for cfg in deps_info["configs"]:
+                        if old_dict.get(cfg, "UNDEFINED") != curr_dict.get(cfg, "UNDEFINED"):
+                            changed_macros.append(cfg)
+            except:
+                pass
+    else:
+        # 【情况 C：初次编译该文件，或记录丢失】
+        action_taken = "LEARNING_FIRST_TIME"
+
+    # 5. 执行实际的编译 / ccache 调用
+    exit_code = run_ccache(run_with_args)
+
+    # 6. 后置处理：如果发生重新编译 (MISS / LEARNING)，需要提取真实依赖
+    learning_occurred = False
+    if action_taken in ["ECS_MISS_AFFECTED", "ECS_MISS_OLD_AUTOCONF_LOST", "LEARNING_FIRST_TIME"]:
+        if exit_code == 0:
+            learning_occurred = True
+            # 尝试找到 .d 文件，找不到则退化为只扫描 .c 源文件本身
+            files_to_scan = [src_file]
+            if d_file_path and os.path.exists(d_file_path):
+                files_to_scan.extend(parse_d_file(d_file_path))
+            
+            # 提取宏集合
+            used_configs = extract_configs_from_files(files_to_scan)
+            curr_dict = parse_autoconf(autoconf_path)
+            new_ecs_hash = compute_ecs_hash(used_configs, curr_dict)
+
+            # 更新 JSON 数据结构，保存 History Map
+            history_map = deps_info.get("history", {}) if deps_info else {}
+            # 将当前状态的 ECS Hash 映射到本次使用的真实 autoconf Hash
+            history_map[new_ecs_hash] = current_auto_hash
+
+            new_deps_info = {
+                "configs": used_configs,
+                "last_auto_hash": current_auto_hash,
+                "history": history_map,  # 保存并持续累积的历史记录表
+                "src_content_hash": src_content_hash  # 保存本次学习时的源码内容 Hash
+            }
+            
+            with open(deps_json_path, 'w') as f:
+                json.dump(new_deps_info, f)
+
+    # 增强全面的日志输出，满足详细追踪要求
+    log_info = {
+        "file": src_file,
+        "out_dir": out_dir,
+        "autoconf_path": autoconf_path,
+        "action": action_taken,
+        "auto_changed": auto_changed_flag,
+        "src_deps_changed": src_changed_flag,
+        "ecs_hit": action_taken in ["ECS_HIT_TRICK", "FAST_PATH_UNCHANGED"],
+        "learning": learning_occurred,
+        "changed_macros": changed_macros
+    }
+    # dump 时将 ensure_ascii 设为 False 以免内部中文等路径转换出错
+    logging.info(json.dumps(log_info, ensure_ascii=False))
+
+    return exit_code
+
+def run_ccache(args):
+    """透明调用 ccache"""
+    cmd = ["ccache"] + args
+    result = subprocess.run(cmd)
+    return result.returncode
+
+def print_summary():
+    """解析日志，输出统计报告"""
+    import json # 确保 json 模块可用
+    # 为日志解析适配多环境路径嗅探
+    log_file_path = "cecs.log"
+    if not os.path.exists(log_file_path):
+        if os.path.exists("out/cecs.log"): log_file_path = "out/cecs.log"
+        elif os.path.exists("common/out/cecs.log"): log_file_path = "common/out/cecs.log"
+        else:
+            print("未找到 ECS 编译日志 (当前目录及常见 out 目录均无 cecs.log)! ")
+            return
+
+    stats = {
+        "FAST_PATH_UNCHANGED": 0,
+        "ECS_HIT_TRICK": 0,
+        "ECS_MISS_AFFECTED": 0,
+        "LEARNING_FIRST_TIME": 0,
+        "ECS_MISS_OLD_AUTOCONF_LOST": 0
+    }
+    
+    all_changed_macros = set()  # 收集导致miss的所有 CONFIG 宏
+    
+    print("\n" + "="*55)
+    print(f" CCache ECS 编译加速统计报告 (读取自 {log_file_path})")
+    print("="*55)
+    
+    with open(log_file_path, 'r') as f:
+        for line in f:
+            try:
+                # 尝试作为标准 JSON 解析以提取全量数据
+                data = json.loads(line)
+                if "event" in data:
+                    event = data["event"]
+                    action = event.get("action")
+                    if action:
+                        stats[action] = stats.get(action, 0) + 1
+                    
+                    # 提取导致 miss 的具体宏列表
+                    macros = event.get("changed_macros", [])
+                    if macros:
+                        all_changed_macros.update(macros)
+            except:
+                # 兼容异常或非标准格式，降级使用正则提取
+                match = re.search(r'"action": "([^"]+)"', line)
+                if match:
+                    action = match.group(1)
+                    stats[action] = stats.get(action, 0) + 1
+
+    total = sum(stats.values())
+    print(f"总计接管编译文件数: {total}")
+    if total > 0:
+        print("\n[各项状态触发次数与占比统计]")
+        for action, count in stats.items():
+            if count > 0:
+                percent = (count / total) * 100
+                print(f"  - {action}: {count} ({percent:.1f}%)")
+        
+        ecs_total = stats['ECS_HIT_TRICK'] + stats['ECS_MISS_AFFECTED']
+        if ecs_total > 0:
+            print(f"\n[配置变化(menuconfig)拦截详情]")
+            print(f"  - 触发 ECS 校验的文件总数: {ecs_total}")
+            print(f"  - 成功拯救 (Trick Hit): {stats['ECS_HIT_TRICK']} (拦截成功率: {stats['ECS_HIT_TRICK']/ecs_total*100:.1f}%)")
+            print(f"  - 穿透重编 (Miss): {stats['ECS_MISS_AFFECTED']} (拦截失败率: {stats['ECS_MISS_AFFECTED']/ecs_total*100:.1f}%)")
+            
+        # [新增] 打印出发生实质性改变的配置选项
+        if all_changed_macros:
+            print(f"\n[导致 ECS Miss 的实质性变化配置项 (Changed Macros)]")
+            for macro in sorted(list(all_changed_macros)):
+                print(f"  * {macro}")
+        elif stats['ECS_MISS_AFFECTED'] > 0:
+            print(f"\n[导致 ECS Miss 的实质性变化配置项]")
+            print("  * (日志中未记录具体宏或为源码内容篡改导致穿透)")
+            
+    print("="*55 + "\n")
+
+if __name__ == '__main__':
+    sys.exit(main())
