@@ -75,7 +75,7 @@ def unzip_file(zip_path, extract_to, folder_name):
     
     # 检查系统是否安装 unzip
     if not shutil.which("unzip"):
-        raise RuntimeError("未找到 'unzip' 命令，请安装 unzip (如 apt install unzip)")
+        raise RuntimeError("'unzip' Not found. Please install unzip (e.g., apt install unzip)")
 
     # 创建临时解压目录
     temp_extract = os.path.join(extract_to, '_temp_extract')
@@ -168,12 +168,12 @@ def apply_kernel_suffix(root_dir, input_kernel_suffix=None, kernel_name=None):
     # 确定使用的后缀
     if input_kernel_suffix:
         suffix = input_kernel_suffix
-        print(f"当前内核版本后缀：{suffix}")
+        print(f"Using input kernel suffix: {suffix}")
     else:
         if kernel_name is None:
             raise ValueError("Neither INPUT_KERNEL_SUFFIX nor KERNEL_NAME is provided")
         suffix = kernel_name
-        print(f"当前内核版本后缀：{suffix}")
+        print(f"Using kernel name as suffix: {suffix}")
 
     # 1. 修改 setlocalversion 文件
     if os.path.isfile(setlocalversion_path):
@@ -194,7 +194,7 @@ def apply_kernel_suffix(root_dir, input_kernel_suffix=None, kernel_name=None):
         with open(setlocalversion_path, "w") as f:
             f.writelines(new_lines)
     else:
-        print(f"警告: 文件 {setlocalversion_path} 不存在，跳过修改")
+        print(f"Warning: File {setlocalversion_path} not found, skipping modification")
 
     # 2. 修改 gki_defconfig 文件
     if os.path.isfile(defconfig_path):
@@ -210,9 +210,9 @@ def apply_kernel_suffix(root_dir, input_kernel_suffix=None, kernel_name=None):
         with open(defconfig_path, "w") as f:
             f.write(new_content)
     else:
-        print(f"警告: 文件 {defconfig_path} 不存在，跳过修改")
+        print(f"Warning: File {defconfig_path} not found, skipping modification")
 
-    print("内核版本后缀替换完成")
+    print("Finished applying kernel suffix.")
 
 def check_version_compatibility(supported_versions, kernel_version):
     """
@@ -234,11 +234,14 @@ def manual_mod(workspace_dir, mod_path, kconfig):
     if os.path.isfile(setup_script):
         print(f"Warning: setup.sh not found in {mod_path}, skipping manual mod...")
         env = os.environ.copy()
+        script_dir = os.path.dirname(__file__)
         env["KERNEL_WORKSPACE"] = workspace_dir
         env["SCRIPT_DIR"] = os.path.dirname(__file__)
         env["MOD_PATH"] = mod_path
         env["ANDROID_VERSION"] = kconfig.get("android_version")
         env["KERNEL_VERSION"] = kconfig.get("kernel_version")
+        env["DOWNLOAD_FILE"] = os.path.join(script_dir, "kernelbuild.py") + " --download"
+        env["APPLY_PATCH"] = os.path.join(script_dir, "kernelbuild.py") + " --applypatch"
         return_code = subprocess.run(["bash", setup_script], cwd=workspace_dir, env=env, check=True)
         if return_code.returncode != 0:
             print(f"Warning: failed to apply manual mod {mod_path}, skipping...")
@@ -279,6 +282,7 @@ def post_mod(workspace_dir, mod_path, kconfig):
         print(f"Warning: post.sh not found in {mod_path}, skipping manual mod...")
         return True
     env = os.environ.copy()
+    script_dir = os.path.dirname(__file__)
     env["KERNEL_WORKSPACE"] = workspace_dir
     env["SCRIPT_DIR"] = os.path.dirname(__file__)
     env["MOD_PATH"] = mod_path
@@ -286,6 +290,8 @@ def post_mod(workspace_dir, mod_path, kconfig):
     env["KERNEL_VERSION"] = kconfig.get("kernel_version")
     env["IMAGE_PATH"] = os.path.join(workspace_dir, "anykernel3/Image")
     env["AK3_DIR"] = os.path.join(workspace_dir, "anykernel3")
+    env["DOWNLOAD_FILE"] = os.path.join(script_dir, "kernelbuild.py") + " --download"
+    env["APPLY_PATCH"] = os.path.join(script_dir, "kernelbuild.py") + " --applypatch"
     return_code = subprocess.run(["bash", setup_script], cwd=workspace_dir, env=env, check=True)
     if return_code.returncode != 0:
         print(f"Warning: failed to apply manual mod {mod_path}, skipping...")
@@ -475,7 +481,7 @@ def init_workspace(is_development=False):
 
 
 
-def start_build():
+def start_build(only_config=False):
     # 基础路径设置
     script_dir = os.path.dirname(os.path.abspath(__file__))
     os.chdir(script_dir)
@@ -592,20 +598,20 @@ def start_build():
         f.write(f"export LD_PRELOAD='{preload_libs}'\n")
         f.write(f"export FAKESTAT='{env['FAKESTAT']}'\n")
         f.write(f"export FAKETIME='{env['FAKETIME']}'\n")
-        f.write('echo ">>> Wrapper 内部环境检查完毕."\n')
+        f.write('echo ">>> Wrapper Check."\n')
         f.write('exec "$@"\n')
     os.chmod(test_wrapper, 0o755)
 
-    print("--- [Wrapper Test] 正在测试 (date) 命令 ---")
+    print("--- [Wrapper Test] Testing (date) command ---")
     subprocess.run([test_wrapper, "date"], cwd=common_dir, env=env)
-    print("--- [Wrapper Test] 正在测试 (stat) 命令 ---")
+    print("--- [Wrapper Test] Testing (stat) command ---")
     subprocess.run([test_wrapper, "stat", "Makefile"], cwd=common_dir, env=env)
-    print("--- [Wrapper Test] 测试完毕 ---")
+    print("--- [Wrapper Test] Testing completed ---")
 
     # 显示编译前环境时间
-    print("--- 编译前环境时间: ---")
+    print("--- [Wrapper Test] Environment time before compilation: ---")
     subprocess.run(["bash", "-c", f"LD_PRELOAD='{preload_libs}' date"], cwd=common_dir, env=env)
-    print("--- 编译前环境文件时间戳: ---")
+    print("--- [Wrapper Test] Environment file timestamps before compilation: ---")
     subprocess.run(["bash", "-c", f"LD_PRELOAD='{preload_libs}' stat Makefile"], cwd=common_dir, env=env)
 
     # 设置内核编译环境变量
@@ -655,7 +661,9 @@ def start_build():
     ]
     print("Running defconfig:", " ".join(make_cmd_defconfig))
     subprocess.run(make_cmd_defconfig, env=env, check=True, cwd=common_dir)
-
+    if only_config:
+        print("Only generating config file, skipping compilation.")
+        return
     # 第二步：使用 wrapper 编译 Image
     env["CC"] = os.path.join(common_dir, "cc-wrapper")
     env["LD"] = os.path.join(common_dir, "ld-wrapper")
@@ -669,8 +677,8 @@ def start_build():
     print("Building Image:", " ".join(make_cmd_image))
     subprocess.run(make_cmd_image, env=env, check=True,cwd=common_dir)
 
-    print("内核编译完成。")
-    print("进行后期MOD处理...")
+    print("Kernel compilation completed.")
+    print("Processing post-build modifications...")
     config=load_config("kernel.json")
     ak3=config.get("anykernel3")
     ak3zip=download_file(ak3)
@@ -678,14 +686,14 @@ def start_build():
     # copy the built Image to anykernel3
     shutil.copy(os.path.join(common_dir, "out/arch/arm64/boot/Image"), os.path.join(workspace_dir, "anykernel3/Image"))
     apply_mods(workspace_dir, os.path.join(script_dir, "mods"),config, is_post_build=True)
-    print("后期MOD处理完成。")
+    print("Post-build modifications completed.")
     #zip the anykernel3 folder to anykernel3.zip with zip command, and put it in the workspace directory
     anykernel3_dir = os.path.join(workspace_dir, "anykernel3")
     anykernel3_zip = os.path.join(script_dir, "anykernel3.zip")
     if os.path.exists(anykernel3_zip):
         os.remove(anykernel3_zip)
     subprocess.run(["zip", "-r", anykernel3_zip, "."], cwd=anykernel3_dir, check=True)
-    print(f"打包完成，生成的 zip 文件路径: {anykernel3_zip}")
+    print(f"Packaging completed. Generated zip file path: {anykernel3_zip}")
 
 def gen_patch():
     # generate patch file for the changes in common directory
@@ -753,7 +761,21 @@ def clean_workspace():
     subprocess.run(["rm", "-rf", common_dir], check=True)
     shutil.copytree(common_original_dir, common_dir)
     print("Workspace cleaned, common directory restored to original state.")
-
+def dump_symbol(kernel_structure, output_file):
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    workspace_dir = os.path.join(script_dir, "kernel_workspace")
+    common_dir = os.path.join(workspace_dir, "common")
+    kimage = os.path.join(common_dir, "out/vmlinux")
+    if not os.path.exists(kimage):
+        print("Kernel image not found, cannot dump symbol")
+        return
+    try:
+        result = subprocess.run(["pahole", "-C", kernel_structure, kimage], capture_output=True, text=True, check=True)
+        with open(output_file, "w") as f:
+            f.write(result.stdout)
+        print(f"Symbol table dumped to {output_file}")
+    except subprocess.CalledProcessError:
+        print("Failed to dump symbol table.")
 if __name__ == "__main__":
     # 参数解析
     parser = argparse.ArgumentParser(description="Kernel Build Script")
@@ -763,9 +785,11 @@ if __name__ == "__main__":
     parser.add_argument("--init", action="store_true", help="Initialize the kernel workspace")
     parser.add_argument("--dev", action="store_true", help="Initialize workspace in development mode (keep original common directory)")
     parser.add_argument("--clean", action="store_true", help="Clean the kernel workspace common directory with the original common directory")
-    # --download url path
+    parser.add_argument("--dumpsymbol", nargs=2, metavar=("KERNEL_IMAGE", "OUTPUT_FILE"), help="Dump the symbol table of the kernel structure using pahole and save it to a file")
     #helper for downloading files, not used in the main flow
     parser.add_argument("--download", nargs=2, metavar=("URL", "OUTPUT_PATH"), help="Download a file from URL to OUTPUT_PATH using the download_file function")
+    parser.add_argument("--dumpconfig", nargs=1, metavar="OUTPUT_FILE", help="Dump the current kernel configuration to a file")
+    parser.add_argument("--auto", action="store_true", help="Automatically initialize and build the kernel")
     args = parser.parse_args()
     if args.init:
         if args.dev:
@@ -780,8 +804,26 @@ if __name__ == "__main__":
         gen_patch()
     if args.applypatch:
         apply_patch(args.applypatch[0])
+    if args.auto:
+        init_workspace()
+        start_build()
     if args.download:
         url, output_path = args.download
         downloaded_file = download_file(url)
         shutil.copy(downloaded_file, output_path)
         print(f"File downloaded from {url} to {output_path}")
+    if args.dumpsymbol:
+        kernel_structure, output_file = args.dumpsymbol
+        dump_symbol(kernel_structure, output_file)
+    if args.dumpconfig:
+        start_build(only_config=True)
+        output_file = args.dumpconfig[0]
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        workspace_dir = os.path.join(script_dir, "kernel_workspace")
+        common_dir = os.path.join(workspace_dir, "common")
+        config_path = os.path.join(common_dir, "out/.config")
+        if not os.path.exists(config_path):
+            print("Kernel config not found, cannot dump config")
+            exit(1)
+        shutil.copy(config_path, output_file)
+        print(f"Kernel config dumped to {output_file}")
