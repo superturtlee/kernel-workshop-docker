@@ -148,69 +148,43 @@ def remove_dirty(workspace_dir):
     # 写回文件
     with open(file_path, "w") as f:
         f.writelines(new_lines)
+
 import os
 
-def apply_kernel_suffix(root_dir, input_kernel_suffix=None, kernel_name=None):
-    """
-    模拟 bash 脚本功能：
-    cd "$ROOT_DIR/kernel_workspace"
-    if [[ -n "$INPUT_KERNEL_SUFFIX" ]]; then
-      使用 INPUT_KERNEL_SUFFIX
-    else
-      使用 KERNEL_NAME
-    fi
-    修改 setlocalversion 和 gki_defconfig 中的内核版本后缀，并禁用自动版本后缀。
-    """
+def apply_kernel_suffix(root_dir, suffix=None):
     workspace = os.path.join(root_dir, "kernel_workspace")
     setlocalversion_path = os.path.join(workspace, "common/scripts/setlocalversion")
     defconfig_path = os.path.join(workspace, "common/arch/arm64/configs/gki_defconfig")
-
-    # 确定使用的后缀
-    if input_kernel_suffix:
-        suffix = input_kernel_suffix
-        print(f"Using input kernel suffix: {suffix}")
-    else:
-        if kernel_name is None:
-            raise ValueError("Neither INPUT_KERNEL_SUFFIX nor KERNEL_NAME is provided")
-        suffix = kernel_name
-        print(f"Using kernel name as suffix: {suffix}")
-
-    # 1. 修改 setlocalversion 文件
+    if not suffix:
+        return
     if os.path.isfile(setlocalversion_path):
         with open(setlocalversion_path, "r") as f:
             lines = f.readlines()
 
-        # 修改最后一行：将 echo "$res" 替换为 echo "-{suffix}"
+        # 删除所有 '${scm_version}'
+        lines = [line.replace('${scm_version}', '') for line in lines]
+
+        # 将最后一行中的 'echo "$res"' 替换为 'echo "-{suffix}"'
         if lines:
             last_line = lines[-1]
-            # 替换 echo "$res" 为 echo "-{suffix}"
             new_last_line = last_line.replace('echo "$res"', f'echo "-{suffix}"')
             lines[-1] = new_last_line
 
-        # 删除所有出现的 ${scm_version}
-        new_lines = [line.replace('${scm_version}', '') for line in lines]
-
-        # 写回文件
         with open(setlocalversion_path, "w") as f:
-            f.writelines(new_lines)
+            f.writelines(lines)
     else:
-        print(f"Warning: File {setlocalversion_path} not found, skipping modification")
-
-    # 2. 修改 gki_defconfig 文件
+        print(f"Warning: {setlocalversion_path} not found")
     if os.path.isfile(defconfig_path):
         with open(defconfig_path, "r") as f:
             content = f.read()
 
-        # 将所有 -4k 替换为 -{suffix}
         new_content = content.replace("-4k", f"-{suffix}")
-
-        # 追加 CONFIG_LOCALVERSION_AUTO=n
         new_content += "\nCONFIG_LOCALVERSION_AUTO=n\n"
 
         with open(defconfig_path, "w") as f:
             f.write(new_content)
     else:
-        print(f"Warning: File {defconfig_path} not found, skipping modification")
+        print(f"Warning: {defconfig_path} not found")
 
     print("Finished applying kernel suffix.")
 
@@ -225,8 +199,34 @@ def check_version_compatibility(supported_versions, kernel_version):
         if kernel_version.startswith(version):
             return True
     return False
-    
-def manual_mod(workspace_dir, mod_path, kconfig):
+
+def apply_patch(patch_file,allow_failure=False):
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    try:
+        subprocess.run(["patch", "-p1", "-F", "3", "-i", patch_file], cwd=os.path.join(script_dir, "kernel_workspace/common"), check=True)
+        print(f"Patch {patch_file} applied successfully.")
+        return True
+    except subprocess.CalledProcessError:
+        if allow_failure:
+            print(f"Warning: failed to apply patch {patch_file}, but continuing anyway...")
+            return True
+        else:
+            print(f"Error: failed to apply patch {patch_file}.")
+            return False
+def append_defconfig(defconfig_append,mod_name):
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    gki_defconfig = os.path.join(script_dir, "kernel_workspace/common/arch/arm64/configs/gki_defconfig")
+    if os.path.isfile(gki_defconfig):
+        with open(defconfig_append, "r") as f:
+            append_content = f.read()
+        with open(gki_defconfig, "a") as f:
+            f.write("\n# Append from mod " + mod_name + "\n")
+            f.write(append_content)
+        print(f"Defconfig append from {defconfig_append} applied successfully.")
+    else:
+        print(f"Warning: gki_defconfig not found in workspace, skipping defconfig append from {defconfig_append}...")
+
+def manual_mod(workspace_dir, mod_path, kconfig,allow_failure=False):
     # directly excute the setup.sh in the mod_path
     #run in the workspace_dir
     #export KERNEL_WORKSPACE MOD_PATH before excuting the script
@@ -248,29 +248,10 @@ def manual_mod(workspace_dir, mod_path, kconfig):
             return False
     patch_file = os.path.join(mod_path, "patch.diff")
     if os.path.isfile(patch_file):
-        
-        common_dir = os.path.join(workspace_dir, "common")
-        # copy the patch file to common directory
-        shutil.copy(patch_file, common_dir)
-        # apply the patch
-        try:
-            subprocess.run(["patch", "-p1", "-F", "3", "-i", os.path.basename(patch_file)], cwd=common_dir, check=True)
-            os.remove(os.path.join(common_dir, os.path.basename(patch_file)))
-            print(f"Patch {mod_path} applied successfully.")
-        except subprocess.CalledProcessError:
-            print(f"Warning: failed to apply patch {mod_path}, skipping...")
+        apply_patch(patch_file, allow_failure=allow_failure)
     defconfig_append=os.path.join(mod_path, "defconfig_append")
     if os.path.isfile(defconfig_append):
-        gki_defconfig = os.path.join(workspace_dir, "common/arch/arm64/configs/gki_defconfig")
-        if os.path.isfile(gki_defconfig):
-            with open(defconfig_append, "r") as f:
-                append_content = f.read()
-            with open(gki_defconfig, "a") as f:
-                f.write("\n# Append from manual mod " + os.path.basename(mod_path) + "\n")
-                f.write(append_content)
-            print(f"Defconfig append for manual mod {mod_path} applied successfully.")
-        else:
-            print(f"Warning: gki_defconfig not found in workspace, skipping defconfig append for manual mod {mod_path}...")
+        append_defconfig(defconfig_append, mod_name=kconfig.get("name"))
     print(f"Manual mod {mod_path} applied successfully.")
     return True
 def post_mod(workspace_dir, mod_path, kconfig):
@@ -308,6 +289,8 @@ def load_and_apply_mod(workspace_dir, mod_path,config_kernel,is_post_build=False
         config = json.load(f)
     #check if the version is compatible
     supported_versions = config.get("versions", [])
+    # load allowfailure from config, default to False
+    allow_failure = config.get("allowfailure", True)
     kernel_version = config_kernel.get("version")
     if not check_version_compatibility(supported_versions, kernel_version):
         print(f"Warning: mod {config.get('name')} does not support kernel version {kernel_version}, skipping...")
@@ -316,7 +299,7 @@ def load_and_apply_mod(workspace_dir, mod_path,config_kernel,is_post_build=False
     if is_post_build:
         return post_mod(workspace_dir, mod_path, config_kernel)
     else:
-        return manual_mod(workspace_dir, mod_path, config_kernel)
+        return manual_mod(workspace_dir, mod_path, config_kernel, allow_failure=allow_failure)
 
 
 def apply_mods(workspace_dir, mods_dir, version,is_post_build=False):
@@ -462,9 +445,9 @@ def init_workspace(is_development=False):
     #if suffix is provided, use it. Otherwise, use the kernel name as suffix
     suffix = config.get("suffix")
     if suffix:
-        apply_kernel_suffix(workspace_dir, input_kernel_suffix=suffix, kernel_name=config.get("name"))
+        apply_kernel_suffix(script_dir, suffix=config.get("suffix"))
     else:
-        apply_kernel_suffix(workspace_dir, kernel_name=config.get("name"))
+        apply_kernel_suffix(script_dir, suffix=config.get("name"))
     apply_mods(workspace_dir, os.path.join(script_dir, "mods"), config)
     common_dir = os.path.join(workspace_dir, "common")
     #if is_development is True, copy the common directory to common_original for later use
