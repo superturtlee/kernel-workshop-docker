@@ -1,18 +1,3 @@
-diff --git a/fs/overlayfs/util.c b/fs/overlayfs/util.c
---- a/fs/overlayfs/util.c
-+++ b/fs/overlayfs/util.c
-@@ -201,9 +201,7 @@
- 		return true;
- 
- 	return dentry->d_flags & (DCACHE_NEED_AUTOMOUNT |
--				  DCACHE_MANAGE_TRANSIT |
--				  DCACHE_OP_HASH |
--				  DCACHE_OP_COMPARE);
-+				  DCACHE_MANAGE_TRANSIT);
- }
- 
- enum ovl_path_type ovl_path_type(struct dentry *dentry)
-
 diff --git a/include/linux/cgroup-defs.h b/include/linux/cgroup-defs.h
 --- a/include/linux/cgroup-defs.h
 +++ b/include/linux/cgroup-defs.h
