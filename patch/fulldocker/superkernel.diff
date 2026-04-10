@@ -740,10 +740,19 @@ diff --git a/include/net/netns/ipv4.h b/include/net/netns/ipv4.h
  	u8 sysctl_igmp_llm_reports;
  	int sysctl_igmp_max_memberships;
  	int sysctl_igmp_max_msf;
-@@ -256,13 +249,6 @@
- 	struct fib_rules_ops	*mr_rules_ops;
+@@ -247,22 +240,6 @@
+ 	unsigned long *sysctl_local_reserved_ports;
+ 	int sysctl_ip_prot_sock;
  #endif
- #endif
+-
+-#ifdef CONFIG_IP_MROUTE
+-#ifndef CONFIG_IP_MROUTE_MULTIPLE_TABLES
+-	struct mr_table		*mrt;
+-#else
+-	struct list_head	mr_tables;
+-	struct fib_rules_ops	*mr_rules_ops;
+-#endif
+-#endif
 -#ifdef CONFIG_IP_ROUTE_MULTIPATH
 -	struct sysctl_fib_multipath_hash_seed sysctl_fib_multipath_hash_seed;
 -	u32 sysctl_fib_multipath_hash_fields;
@@ -754,7 +763,7 @@ diff --git a/include/net/netns/ipv4.h b/include/net/netns/ipv4.h
  	struct fib_notifier_ops	*notifier_ops;
  	unsigned int	fib_seq;	/* protected by rtnl_mutex */
  
-@@ -271,7 +257,21 @@
+@@ -271,7 +248,43 @@
  
  	atomic_t	rt_genid;
  	siphash_key_t	ip_id_key;
@@ -776,6 +785,28 @@ diff --git a/include/net/netns/ipv4.h b/include/net/netns/ipv4.h
 +#endif
 +		};
 +	};
++	union
++	{
++		struct{
++			u64 __force_padding1;
++			u64 __force_padding2;
++			u64 __force_padding3;//24bytes
++		};
++		struct 
++		{
++			#ifdef CONFIG_IP_MROUTE
++#ifndef CONFIG_IP_MROUTE_MULTIPLE_TABLES
++	struct mr_table		*mrt; //8
++#else
++	struct list_head	mr_tables;//16
++	struct fib_rules_ops	*mr_rules_ops;//8
++#endif
++#endif
++			/* data */
++		};
++		
++	};
++	
  };
  #endif
 
