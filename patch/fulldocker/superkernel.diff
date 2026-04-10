@@ -42,7 +42,7 @@ diff --git a/include/linux/cgroup-defs.h b/include/linux/cgroup-defs.h
  
  	/* all threaded csets whose ->dom_cset points to this cset */
  	struct list_head threaded_csets;
-@@ -319,9 +329,61 @@
+@@ -319,9 +329,63 @@
  
  	/* For RCU-protected deletion */
  	struct rcu_head rcu_head;
@@ -79,8 +79,10 @@ diff --git a/include/linux/cgroup-defs.h b/include/linux/cgroup-defs.h
 +static inline void css_set_set_subsys(struct css_set *cset, int ssid,
 +				      struct cgroup_subsys_state *css)
 +{
-+	if (css_set_uses_ext_ssid(ssid))
++	if (css_set_uses_ext_ssid(ssid)){
 +		cset->ext->subsys[css_set_ext_index(ssid)] = css;
++		return;
++	}
 +	cset->subsys[ssid] = css;
 +}
 +
@@ -106,7 +108,7 @@ diff --git a/include/linux/cgroup-defs.h b/include/linux/cgroup-defs.h
  
  struct cgroup_base_stat {
  	struct task_cputime cputime;
-@@ -413,6 +475,12 @@
+@@ -413,6 +477,12 @@
  	 */
  	int nr_frozen_tasks;
  };
@@ -119,7 +121,7 @@ diff --git a/include/linux/cgroup-defs.h b/include/linux/cgroup-defs.h
  
  struct cgroup {
  	/* self css with NULL ->ss, points back to this cgroup */
-@@ -486,13 +554,13 @@
+@@ -486,13 +556,13 @@
  	u16 old_subtree_ss_mask;
  
  	/* Private pointers for each registered subsystem */
@@ -135,7 +137,7 @@ diff --git a/include/linux/cgroup-defs.h b/include/linux/cgroup-defs.h
  
  	struct cgroup_root *root;
  
-@@ -509,7 +577,7 @@
+@@ -509,7 +579,7 @@
  	 * following lists all css_sets which point to this cgroup's css
  	 * for the given subsystem.
  	 */
@@ -144,7 +146,7 @@ diff --git a/include/linux/cgroup-defs.h b/include/linux/cgroup-defs.h
  
  	/*
  	 * If !threaded, self.  If threaded, it points to the nearest
-@@ -569,13 +637,40 @@
+@@ -569,13 +639,40 @@
  #ifdef CONFIG_BPF_SYSCALL
  	struct bpf_local_storage __rcu  *bpf_cgrp_storage;
  #endif
@@ -461,7 +463,7 @@ diff --git a/include/linux/perf_event.h b/include/linux/perf_event.h
 +	uintptr_t ptr;
 +
 +	/* 使用 READ_ONCE 确保读取的原子性/volatile */
-+	ptr = (uintptr_t)READ_ONCE(mutex->android_oem_data1[0]);
++	ptr = (uintptr_t)READ_ONCE(mutex->android_oem_data1[1]);
 +	return (struct perf_cgroup *)ptr;
 +}
 +
