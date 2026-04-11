@@ -3805,3 +3805,335 @@ diff --git a/net/sctp/transport.c b/net/sctp/transport.c
  	} else {
  		/* 6.3.1 C2) When the first RTT measurement R is made, set
  		 * SRTT <- R, RTTVAR <- R/2.
+diff --git a/block/blk-cgroup.c b/block/blk-cgroup.c
+--- a/block/blk-cgroup.c
++++ b/block/blk-cgroup.c
+@@ -173,7 +173,8 @@
+ 	int cpu;
+ 
+ #ifdef CONFIG_BLK_CGROUP_PUNT_BIO
+-	WARN_ON(!bio_list_empty(&blkg->async_bios));
++	struct bio_list async_bios = blkcg_gq_async_bios(blkg);
++	WARN_ON(!bio_list_empty(&async_bios));
+ #endif
+ 	/*
+ 	 * Flush all the non-empty percpu lockless lists before releasing
+@@ -218,7 +219,9 @@
+ 
+ 	/* as long as there are pending bios, @blkg can't go away */
+ 	spin_lock(&blkg->async_bio_lock);
+-	bio_list_merge_init(&bios, &blkg->async_bios);
++	struct bio_list bios1 = blkcg_gq_async_bios(blkg);
++	bio_list_merge_init(&bios, &bios1);
++	blkcg_gq_async_bios_set(blkg, bios1);
+ 	spin_unlock(&blkg->async_bio_lock);
+ 
+ 	/* start plug only when bio_list contains at least 2 bios */
+@@ -244,7 +247,9 @@
+ 
+ 	if (blkg->parent) {
+ 		spin_lock(&blkg->async_bio_lock);
+-		bio_list_add(&blkg->async_bios, bio);
++		struct bio_list bios = blkcg_gq_async_bios(blkg);
++		bio_list_add(&bios, bio);
++		blkcg_gq_async_bios_set(blkg, bios);
+ 		spin_unlock(&blkg->async_bio_lock);
+ 		queue_work(blkcg_punt_bio_wq, &blkg->async_bio_work);
+ 	} else {
+@@ -325,7 +330,9 @@
+ 	blkg->iostat.blkg = blkg;
+ #ifdef CONFIG_BLK_CGROUP_PUNT_BIO
+ 	spin_lock_init(&blkg->async_bio_lock);
+-	bio_list_init(&blkg->async_bios);
++	struct bio_list async_bios = blkcg_gq_async_bios(blkg);
++	bio_list_init(&async_bios);
++	blkcg_gq_async_bios_set(blkg, async_bios);
+ 	INIT_WORK(&blkg->async_bio_work, blkg_async_bio_workfn);
+ #endif
+ 
+diff --git a/block/blk-cgroup.h b/block/blk-cgroup.h
+--- a/block/blk-cgroup.h
++++ b/block/blk-cgroup.h
+@@ -69,30 +69,52 @@
+ 
+ 	/* is this blkg online? protected by both blkcg and q locks */
+ 	bool				online;
+-
++#ifdef CONFIG_BLK_CGROUP_PUNT_BIO
++	spinlock_t			async_bio_lock;//4
++#endif
+ 	struct blkg_iostat_set __percpu	*iostat_cpu;
+ 	struct blkg_iostat_set		iostat;
+ 
+ 	struct blkg_policy_data		*pd[BLKCG_MAX_POLS];
+-#ifdef CONFIG_BLK_CGROUP_PUNT_BIO
+-	spinlock_t			async_bio_lock;
+-	struct bio_list			async_bios;
+-#endif
+ 	union {
+ 		struct work_struct	async_bio_work;
+ 		struct work_struct	free_work;
+ 	};
+ 
+ 	atomic_t			use_delay;
++#ifdef CONFIG_BLK_CGROUP_PUNT_BIO
++	u32			async_bios_head_high;
++#endif
+ 	atomic64_t			delay_nsec;
+ 	atomic64_t			delay_start;
+ 	u64				last_delay;
+ 	int				last_use;
++#ifdef CONFIG_BLK_CGROUP_PUNT_BIO
++	u32			async_bios_head_low;
++#endif
+ 
+ 	struct rcu_head			rcu_head;
+ 
+-	ANDROID_OEM_DATA(1);
++#ifdef CONFIG_BLK_CGROUP_PUNT_BIO
++	struct 	bio* async_bios_tail;//16
++#endif
+ };
++#ifdef CONFIG_BLK_CGROUP_PUNT_BIO
++static inline struct bio_list blkcg_gq_async_bios(struct blkcg_gq *blkg)
++{
++	struct bio_list bios = {
++		.head = (struct bio *)((u64)(blkg->async_bios_head_high)<<32 | blkg->async_bios_head_low),
++		.tail = blkg->async_bios_tail,
++	};
++	return bios;
++}
++static inline void blkcg_gq_async_bios_set(struct blkcg_gq *blkg, struct bio_list bios)
++{
++	blkg->async_bios_tail = bios.tail;
++	blkg->async_bios_head_low = (u32)(uintptr_t)bios.head;
++	blkg->async_bios_head_high = (u32)((uintptr_t)bios.head >> 32);
++}
++#endif
+ 
+ struct blkcg {
+ 	struct cgroup_subsys_state	css;
+diff --git a/include/linux/blkdev.h b/include/linux/blkdev.h
+--- a/include/linux/blkdev.h
++++ b/include/linux/blkdev.h
+@@ -581,10 +581,6 @@
+ 
+ 	int			mq_freeze_depth;
+ 
+-#ifdef CONFIG_BLK_DEV_THROTTLING
+-	/* Throttle data */
+-	struct throtl_data *td;
+-#endif
+ 	struct rcu_head		rcu_head;
+ #ifdef CONFIG_LOCKDEP
+ 	struct task_struct	*mq_freeze_owner;
+@@ -618,7 +614,17 @@
+ 
+ 	ANDROID_KABI_RESERVE(1);
+ 	ANDROID_KABI_RESERVE(2);
+-	ANDROID_KABI_RESERVE(3);
++	union {
++		struct {
++			ANDROID_KABI_RESERVE(3);
++		};
++		struct {
++#ifdef CONFIG_BLK_DEV_THROTTLING
++			/* Throttle data */
++			struct throtl_data *td;
++#endif
++		};
++	};
+ 	ANDROID_KABI_RESERVE(4);
+ 	ANDROID_OEM_DATA(1);
+ };
+diff --git a/include/linux/ipc_namespace.h b/include/linux/ipc_namespace.h
+--- a/include/linux/ipc_namespace.h
++++ b/include/linux/ipc_namespace.h
+@@ -22,11 +22,11 @@
+ 	struct idr ipcs_idr;
+ 	int max_idx;
+ 	int last_idx;	/* For wrap around detection */
+-#ifdef CONFIG_CHECKPOINT_RESTORE
+-	int next_id;
+-#endif
+ 	struct rhashtable key_ht;
+ };
++#ifdef CONFIG_CHECKPOINT_RESTORE
++#define ipc_next_id(IPC_IDS) ((IPC_IDS)->key_ht.hole)//隔山打牛 借我个对齐空洞
++#endif
+ 
+ struct ipc_namespace {
+ 	struct ipc_ids	ids[3];
+diff --git a/include/linux/rhashtable-types.h b/include/linux/rhashtable-types.h
+--- a/include/linux/rhashtable-types.h
++++ b/include/linux/rhashtable-types.h
+@@ -85,6 +85,7 @@
+ 	unsigned int			max_elems;
+ 	struct rhashtable_params	p;
+ 	bool				rhlist;
++	int hole;//对齐空洞
+ 	struct work_struct		run_work;
+ 	struct mutex                    mutex;
+ 	spinlock_t			lock;
+diff --git a/ipc/ipc_sysctl.c b/ipc/ipc_sysctl.c
+--- a/ipc/ipc_sysctl.c
++++ b/ipc/ipc_sysctl.c
+@@ -152,8 +152,8 @@
+ #ifdef CONFIG_CHECKPOINT_RESTORE
+ 	{
+ 		.procname	= "sem_next_id",
+-		.data		= &init_ipc_ns.ids[IPC_SEM_IDS].next_id,
+-		.maxlen		= sizeof(init_ipc_ns.ids[IPC_SEM_IDS].next_id),
++		.data		= &init_ipc_ns.ids[IPC_SEM_IDS].key_ht.hole,
++		.maxlen		= sizeof(init_ipc_ns.ids[IPC_SEM_IDS].key_ht.hole),
+ 		.mode		= 0444,
+ 		.proc_handler	= proc_dointvec_minmax,
+ 		.extra1		= SYSCTL_ZERO,
+@@ -161,8 +161,8 @@
+ 	},
+ 	{
+ 		.procname	= "msg_next_id",
+-		.data		= &init_ipc_ns.ids[IPC_MSG_IDS].next_id,
+-		.maxlen		= sizeof(init_ipc_ns.ids[IPC_MSG_IDS].next_id),
++		.data		= &init_ipc_ns.ids[IPC_MSG_IDS].key_ht.hole,
++		.maxlen		= sizeof(init_ipc_ns.ids[IPC_MSG_IDS].key_ht.hole),
+ 		.mode		= 0444,
+ 		.proc_handler	= proc_dointvec_minmax,
+ 		.extra1		= SYSCTL_ZERO,
+@@ -170,8 +170,8 @@
+ 	},
+ 	{
+ 		.procname	= "shm_next_id",
+-		.data		= &init_ipc_ns.ids[IPC_SHM_IDS].next_id,
+-		.maxlen		= sizeof(init_ipc_ns.ids[IPC_SHM_IDS].next_id),
++		.data		= &init_ipc_ns.ids[IPC_SHM_IDS].key_ht.hole,
++		.maxlen		= sizeof(init_ipc_ns.ids[IPC_SHM_IDS].key_ht.hole),
+ 		.mode		= 0444,
+ 		.proc_handler	= proc_dointvec_minmax,
+ 		.extra1		= SYSCTL_ZERO,
+@@ -211,9 +211,9 @@
+ 	struct ipc_namespace *ns =
+ 		container_of(head->set, struct ipc_namespace, ipc_set);
+ 
+-	if (((table->data == &ns->ids[IPC_SEM_IDS].next_id) ||
+-	     (table->data == &ns->ids[IPC_MSG_IDS].next_id) ||
+-	     (table->data == &ns->ids[IPC_SHM_IDS].next_id)) &&
++	if (((table->data == &ns->ids[IPC_SEM_IDS].key_ht.hole) ||
++	     (table->data == &ns->ids[IPC_MSG_IDS].key_ht.hole) ||
++	     (table->data == &ns->ids[IPC_SHM_IDS].key_ht.hole)) &&
+ 	    checkpoint_restore_ns_capable(ns->user_ns))
+ 		mode = 0666;
+ 	else
+@@ -277,14 +277,14 @@
+ 			else if (tbl[i].data == &init_ipc_ns.sem_ctls)
+ 				tbl[i].data = &ns->sem_ctls;
+ #ifdef CONFIG_CHECKPOINT_RESTORE
+-			else if (tbl[i].data == &init_ipc_ns.ids[IPC_SEM_IDS].next_id)
+-				tbl[i].data = &ns->ids[IPC_SEM_IDS].next_id;
++			else if (tbl[i].data == &init_ipc_ns.ids[IPC_SEM_IDS].key_ht.hole)
++				tbl[i].data = &ns->ids[IPC_SEM_IDS].key_ht.hole;
+ 
+-			else if (tbl[i].data == &init_ipc_ns.ids[IPC_MSG_IDS].next_id)
+-				tbl[i].data = &ns->ids[IPC_MSG_IDS].next_id;
++			else if (tbl[i].data == &init_ipc_ns.ids[IPC_MSG_IDS].key_ht.hole)
++				tbl[i].data = &ns->ids[IPC_MSG_IDS].key_ht.hole;
+ 
+-			else if (tbl[i].data == &init_ipc_ns.ids[IPC_SHM_IDS].next_id)
+-				tbl[i].data = &ns->ids[IPC_SHM_IDS].next_id;
++			else if (tbl[i].data == &init_ipc_ns.ids[IPC_SHM_IDS].key_ht.hole)
++				tbl[i].data = &ns->ids[IPC_SHM_IDS].key_ht.hole;
+ #endif
+ 			else
+ 				tbl[i].data = NULL;
+diff --git a/ipc/util.c b/ipc/util.c
+--- a/ipc/util.c
++++ b/ipc/util.c
+@@ -122,7 +122,7 @@
+ 	ids->max_idx = -1;
+ 	ids->last_idx = -1;
+ #ifdef CONFIG_CHECKPOINT_RESTORE
+-	ids->next_id = -1;
++	ipc_next_id(ids) = -1;
+ #endif
+ }
+ 
+@@ -204,8 +204,8 @@
+ 	int idx, next_id = -1;
+ 
+ #ifdef CONFIG_CHECKPOINT_RESTORE
+-	next_id = ids->next_id;
+-	ids->next_id = -1;
++	next_id = ipc_next_id(ids);
++	ipc_next_id(ids) = -1;
+ #endif
+ 
+ 	/*
+diff --git a/include/linux/netfilter/x_tables.h b/include/linux/netfilter/x_tables.h
+--- a/include/linux/netfilter/x_tables.h
++++ b/include/linux/netfilter/x_tables.h
+@@ -158,24 +158,23 @@
+ 
+ 	/* Called when entry of this type deleted. */
+ 	void (*destroy)(const struct xt_mtdtor_param *);
+-#ifdef CONFIG_NETFILTER_XTABLES_COMPAT
+-	/* Called when userspace align differs from kernel space one */
+-	void (*compat_from_user)(void *dst, const void *src);
+-	int (*compat_to_user)(void __user *dst, const void *src);
+-#endif
+ 	/* Set this to THIS_MODULE if you are a module, otherwise NULL */
+ 	struct module *me;
+ 
+ 	const char *table;
+ 	unsigned int matchsize;
+ 	unsigned int usersize;
+-#ifdef CONFIG_NETFILTER_XTABLES_COMPAT
+-	unsigned int compatsize;
+-#endif
+ 	unsigned int hooks;
+ 	unsigned short proto;
+-
+ 	unsigned short family;
++#ifdef CONFIG_NETFILTER_XTABLES_COMPAT
++	unsigned int compatsize;
++#endif
++#ifdef CONFIG_NETFILTER_XTABLES_COMPAT
++	/* Called when userspace align differs from kernel space one */
++	void (*compat_from_user)(void *dst, const void *src);
++	int (*compat_to_user)(void __user *dst, const void *src);
++#endif
+ };
+ 
+ /* Registration hooks for targets. */
+@@ -199,24 +198,24 @@
+ 
+ 	/* Called when entry of this type deleted. */
+ 	void (*destroy)(const struct xt_tgdtor_param *);
+-#ifdef CONFIG_NETFILTER_XTABLES_COMPAT
+-	/* Called when userspace align differs from kernel space one */
+-	void (*compat_from_user)(void *dst, const void *src);
+-	int (*compat_to_user)(void __user *dst, const void *src);
+-#endif
+ 	/* Set this to THIS_MODULE if you are a module, otherwise NULL */
+ 	struct module *me;
+ 
+ 	const char *table;
+ 	unsigned int targetsize;
+ 	unsigned int usersize;
+-#ifdef CONFIG_NETFILTER_XTABLES_COMPAT
+-	unsigned int compatsize;
+-#endif
+ 	unsigned int hooks;
+ 	unsigned short proto;
+ 
+ 	unsigned short family;
++#ifdef CONFIG_NETFILTER_XTABLES_COMPAT
++	unsigned int compatsize;
++#endif
++#ifdef CONFIG_NETFILTER_XTABLES_COMPAT
++	/* Called when userspace align differs from kernel space one */
++	void (*compat_from_user)(void *dst, const void *src);
++	int (*compat_to_user)(void __user *dst, const void *src);
++#endif
+ };
+ 
+ /* Furniture shopping... */
