@@ -1,3 +1,156 @@
+diff --git a/block/blk-cgroup.c b/block/blk-cgroup.c
+--- a/block/blk-cgroup.c
++++ b/block/blk-cgroup.c
+@@ -173,7 +173,8 @@
+ 	int cpu;
+ 
+ #ifdef CONFIG_BLK_CGROUP_PUNT_BIO
+-	WARN_ON(!bio_list_empty(&blkg->async_bios));
++	struct bio_list async_bios = blkcg_gq_async_bios(blkg);
++	WARN_ON(!bio_list_empty(&async_bios));
+ #endif
+ 	/*
+ 	 * Flush all the non-empty percpu lockless lists before releasing
+@@ -218,7 +219,9 @@
+ 
+ 	/* as long as there are pending bios, @blkg can't go away */
+ 	spin_lock(&blkg->async_bio_lock);
+-	bio_list_merge_init(&bios, &blkg->async_bios);
++	struct bio_list bios1 = blkcg_gq_async_bios(blkg);
++	bio_list_merge_init(&bios, &bios1);
++	blkcg_gq_async_bios_set(blkg, bios1);
+ 	spin_unlock(&blkg->async_bio_lock);
+ 
+ 	/* start plug only when bio_list contains at least 2 bios */
+@@ -244,7 +247,9 @@
+ 
+ 	if (blkg->parent) {
+ 		spin_lock(&blkg->async_bio_lock);
+-		bio_list_add(&blkg->async_bios, bio);
++		struct bio_list bios = blkcg_gq_async_bios(blkg);
++		bio_list_add(&bios, bio);
++		blkcg_gq_async_bios_set(blkg, bios);
+ 		spin_unlock(&blkg->async_bio_lock);
+ 		queue_work(blkcg_punt_bio_wq, &blkg->async_bio_work);
+ 	} else {
+@@ -325,7 +330,9 @@
+ 	blkg->iostat.blkg = blkg;
+ #ifdef CONFIG_BLK_CGROUP_PUNT_BIO
+ 	spin_lock_init(&blkg->async_bio_lock);
+-	bio_list_init(&blkg->async_bios);
++	struct bio_list async_bios = blkcg_gq_async_bios(blkg);
++	bio_list_init(&async_bios);
++	blkcg_gq_async_bios_set(blkg, async_bios);
+ 	INIT_WORK(&blkg->async_bio_work, blkg_async_bio_workfn);
+ #endif
+ 
+diff --git a/block/blk-cgroup.h b/block/blk-cgroup.h
+--- a/block/blk-cgroup.h
++++ b/block/blk-cgroup.h
+@@ -69,30 +69,52 @@
+ 
+ 	/* is this blkg online? protected by both blkcg and q locks */
+ 	bool				online;
+-
++#ifdef CONFIG_BLK_CGROUP_PUNT_BIO
++	spinlock_t			async_bio_lock;//4
++#endif
+ 	struct blkg_iostat_set __percpu	*iostat_cpu;
+ 	struct blkg_iostat_set		iostat;
+ 
+ 	struct blkg_policy_data		*pd[BLKCG_MAX_POLS];
+-#ifdef CONFIG_BLK_CGROUP_PUNT_BIO
+-	spinlock_t			async_bio_lock;
+-	struct bio_list			async_bios;
+-#endif
+ 	union {
+ 		struct work_struct	async_bio_work;
+ 		struct work_struct	free_work;
+ 	};
+ 
+ 	atomic_t			use_delay;
++#ifdef CONFIG_BLK_CGROUP_PUNT_BIO
++	u32			async_bios_head_high;
++#endif
+ 	atomic64_t			delay_nsec;
+ 	atomic64_t			delay_start;
+ 	u64				last_delay;
+ 	int				last_use;
++#ifdef CONFIG_BLK_CGROUP_PUNT_BIO
++	u32			async_bios_head_low;
++#endif
+ 
+ 	struct rcu_head			rcu_head;
+ 
+-	ANDROID_OEM_DATA(1);
++#ifdef CONFIG_BLK_CGROUP_PUNT_BIO
++	struct 	bio* async_bios_tail;//16
++#endif
+ };
++#ifdef CONFIG_BLK_CGROUP_PUNT_BIO
++static inline struct bio_list blkcg_gq_async_bios(struct blkcg_gq *blkg)
++{
++	struct bio_list bios = {
++		.head = (struct bio *)((u64)(blkg->async_bios_head_high)<<32 | blkg->async_bios_head_low),
++		.tail = blkg->async_bios_tail,
++	};
++	return bios;
++}
++static inline void blkcg_gq_async_bios_set(struct blkcg_gq *blkg, struct bio_list bios)
++{
++	blkg->async_bios_tail = bios.tail;
++	blkg->async_bios_head_low = (u32)(uintptr_t)bios.head;
++	blkg->async_bios_head_high = (u32)((uintptr_t)bios.head >> 32);
++}
++#endif
+ 
+ struct blkcg {
+ 	struct cgroup_subsys_state	css;
+diff --git a/drivers/misc/Kconfig b/drivers/misc/Kconfig
+--- a/drivers/misc/Kconfig
++++ b/drivers/misc/Kconfig
+@@ -525,7 +525,7 @@
+ 
+ config NTSYNC
+ 	tristate "NT synchronization primitive emulation"
+-	depends on BROKEN
++	default	m
+ 	help
+ 	  This module provides kernel support for emulation of Windows NT
+ 	  synchronization primitives. It is not a hardware driver.
+diff --git a/include/linux/blkdev.h b/include/linux/blkdev.h
+--- a/include/linux/blkdev.h
++++ b/include/linux/blkdev.h
+@@ -581,10 +581,6 @@
+ 
+ 	int			mq_freeze_depth;
+ 
+-#ifdef CONFIG_BLK_DEV_THROTTLING
+-	/* Throttle data */
+-	struct throtl_data *td;
+-#endif
+ 	struct rcu_head		rcu_head;
+ #ifdef CONFIG_LOCKDEP
+ 	struct task_struct	*mq_freeze_owner;
+@@ -618,7 +614,17 @@
+ 
+ 	ANDROID_KABI_RESERVE(1);
+ 	ANDROID_KABI_RESERVE(2);
+-	ANDROID_KABI_RESERVE(3);
++	union {
++		struct {
++			ANDROID_KABI_RESERVE(3);
++		};
++		struct {
++#ifdef CONFIG_BLK_DEV_THROTTLING
++			/* Throttle data */
++			struct throtl_data *td;
++#endif
++		};
++	};
+ 	ANDROID_KABI_RESERVE(4);
+ 	ANDROID_OEM_DATA(1);
+ };
 diff --git a/include/linux/cgroup-defs.h b/include/linux/cgroup-defs.h
 --- a/include/linux/cgroup-defs.h
 +++ b/include/linux/cgroup-defs.h
@@ -29,7 +182,7 @@ diff --git a/include/linux/cgroup-defs.h b/include/linux/cgroup-defs.h
  	 * subsystem registration (at boot time).
  	 */
 -	struct cgroup_subsys_state *subsys[CGROUP_SUBSYS_COUNT];
-+	struct cgroup_subsys_state *subsys[CGROUP_SUBSYS_MAIN_COUNT];
++	struct cgroup_subsys_state *subsys_main[CGROUP_SUBSYS_MAIN_COUNT];
  
  	/* reference count */
  	refcount_t refcount;
@@ -38,7 +191,7 @@ diff --git a/include/linux/cgroup-defs.h b/include/linux/cgroup-defs.h
  	 * iterate through all css's attached to a given cgroup.
  	 */
 -	struct list_head e_cset_node[CGROUP_SUBSYS_COUNT];
-+	struct list_head e_cset_node[CGROUP_SUBSYS_MAIN_COUNT];
++	struct list_head e_cset_node_main[CGROUP_SUBSYS_MAIN_COUNT];
  
  	/* all threaded csets whose ->dom_cset points to this cset */
  	struct list_head threaded_csets;
@@ -73,7 +226,7 @@ diff --git a/include/linux/cgroup-defs.h b/include/linux/cgroup-defs.h
 +{
 +	if (css_set_uses_ext_ssid(ssid))
 +		return cset->ext->subsys[css_set_ext_index(ssid)];
-+	return cset->subsys[ssid];
++	return cset->subsys_main[ssid];
 +}
 +
 +static inline void css_set_set_subsys(struct css_set *cset, int ssid,
@@ -83,14 +236,14 @@ diff --git a/include/linux/cgroup-defs.h b/include/linux/cgroup-defs.h
 +		cset->ext->subsys[css_set_ext_index(ssid)] = css;
 +		return;
 +	}
-+	cset->subsys[ssid] = css;
++	cset->subsys_main[ssid] = css;
 +}
 +
 +static inline struct list_head *css_set_e_cset_node(struct css_set *cset, int ssid)
 +{
 +	if (css_set_uses_ext_ssid(ssid))
 +		return &cset->ext->e_cset_node[css_set_ext_index(ssid)];
-+	return &cset->e_cset_node[ssid];
++	return &cset->e_cset_node_main[ssid];
 +}
 +
 +static inline struct css_set *css_set_from_e_cset_node(struct list_head *node,
@@ -103,14 +256,14 @@ diff --git a/include/linux/cgroup-defs.h b/include/linux/cgroup-defs.h
  
 -	ANDROID_BACKPORT_RESERVE(1);
 -};
-+	return container_of(node, struct css_set, e_cset_node[ssid]);
++	return container_of(node, struct css_set, e_cset_node_main[ssid]);
 +}
  
  struct cgroup_base_stat {
  	struct task_cputime cputime;
-@@ -413,6 +477,12 @@
- 	 */
+@@ -414,6 +478,12 @@
  	int nr_frozen_tasks;
+ 
  };
 +struct cgroup_ext
 +{
@@ -119,48 +272,44 @@ diff --git a/include/linux/cgroup-defs.h b/include/linux/cgroup-defs.h
 +	struct list_head e_csets[CGROUP_SUBSYS_EXT_SLOTS];
 +};
  
- struct cgroup {
- 	/* self css with NULL ->ss, points back to this cgroup */
-@@ -486,13 +556,13 @@
+ /**
+  * struct cgroup_kmi_ext_info is meant to hold extensions to struct cgroup while
+@@ -521,13 +591,13 @@
  	u16 old_subtree_ss_mask;
  
  	/* Private pointers for each registered subsystem */
 -	struct cgroup_subsys_state __rcu *subsys[CGROUP_SUBSYS_COUNT];
-+	struct cgroup_subsys_state __rcu *subsys[CGROUP_SUBSYS_MAIN_COUNT];
++	struct cgroup_subsys_state __rcu *subsys_main[CGROUP_SUBSYS_MAIN_COUNT];
  
  	/*
  	 * Keep track of total number of dying CSSes at and below this cgroup.
  	 * Protected by cgroup_mutex.
  	 */
 -	int nr_dying_subsys[CGROUP_SUBSYS_COUNT];
-+	int nr_dying_subsys[CGROUP_SUBSYS_MAIN_COUNT];
++	int nr_dying_subsys_main[CGROUP_SUBSYS_MAIN_COUNT];
  
  	struct cgroup_root *root;
  
-@@ -509,7 +579,7 @@
+@@ -544,7 +614,7 @@
  	 * following lists all css_sets which point to this cgroup's css
  	 * for the given subsystem.
  	 */
 -	struct list_head e_csets[CGROUP_SUBSYS_COUNT];
-+	struct list_head e_csets[CGROUP_SUBSYS_MAIN_COUNT];
++	struct list_head e_csets_main[CGROUP_SUBSYS_MAIN_COUNT];
  
  	/*
  	 * If !threaded, self.  If threaded, it points to the nearest
-@@ -569,13 +639,40 @@
- #ifdef CONFIG_BPF_SYSCALL
- 	struct bpf_local_storage __rcu  *bpf_cgrp_storage;
- #endif
+@@ -559,7 +629,8 @@
+ 	/* per-cpu recursive resource statistics */
+ 	struct cgroup_rstat_cpu __percpu *rstat_cpu;
+ 	struct list_head rstat_css_list;
 -
-+union {
-+	struct {
- 	ANDROID_BACKPORT_RESERVE(1);
--
-+	};
-+	struct {
-+		struct cgroup_ext *ext;
-+	};
-+};
- 	/* All ancestors including self */
++	/* XXX 56 bytes hole, try to pack */
++	struct cgroup_ext *ext;
+ 	/*
+ 	 * Add padding to separate the read mostly rstat_cpu and
+ 	 * rstat_css_list into a different cacheline from the following
+@@ -616,6 +687,28 @@
  	struct cgroup *ancestors[];
  };
  
@@ -169,21 +318,21 @@ diff --git a/include/linux/cgroup-defs.h b/include/linux/cgroup-defs.h
 +{
 +	if (css_set_uses_ext_ssid(ssid))
 +		return &cgrp->ext->subsys[css_set_ext_index(ssid)];
-+	return &cgrp->subsys[ssid];
++	return &cgrp->subsys_main[ssid];
 +}
 +
 +static inline int *cgroup_nr_dying_subsys_ptr(struct cgroup *cgrp, int ssid)
 +{
 +	if (css_set_uses_ext_ssid(ssid))
 +		return &cgrp->ext->nr_dying_subsys[css_set_ext_index(ssid)];
-+	return &cgrp->nr_dying_subsys[ssid];
++	return &cgrp->nr_dying_subsys_main[ssid];
 +}
 +
 +static inline struct list_head *cgroup_e_csets_ptr(struct cgroup *cgrp, int ssid)
 +{
 +	if (css_set_uses_ext_ssid(ssid)) 
 +		return &cgrp->ext->e_csets[css_set_ext_index(ssid)];
-+	return &cgrp->e_csets[ssid];
++	return &cgrp->e_csets_main[ssid];
 +}
 +
  /*
@@ -265,11 +414,29 @@ diff --git a/include/linux/cgroup_subsys.h b/include/linux/cgroup_subsys.h
 +#if IS_ENABLED(CONFIG_CGROUP_HUGETLB)
 +SUBSYS(hugetlb)
 +#endif
-\ 文件末尾没有换行符
+\ No newline at end of file
+diff --git a/include/linux/ipc_namespace.h b/include/linux/ipc_namespace.h
+--- a/include/linux/ipc_namespace.h
++++ b/include/linux/ipc_namespace.h
+@@ -22,11 +22,11 @@
+ 	struct idr ipcs_idr;
+ 	int max_idx;
+ 	int last_idx;	/* For wrap around detection */
+-#ifdef CONFIG_CHECKPOINT_RESTORE
+-	int next_id;
+-#endif
+ 	struct rhashtable key_ht;
+ };
++#ifdef CONFIG_CHECKPOINT_RESTORE
++#define ipc_next_id(IPC_IDS) ((IPC_IDS)->key_ht.hole)//隔山打牛 借我个对齐空洞
++#endif
+ 
+ struct ipc_namespace {
+ 	struct ipc_ids	ids[3];
 diff --git a/include/linux/ipv6.h b/include/linux/ipv6.h
 --- a/include/linux/ipv6.h
 +++ b/include/linux/ipv6.h
-@@ -220,11 +220,10 @@
+@@ -221,11 +221,10 @@
  struct ipv6_pinfo {
  	struct in6_addr 	saddr;
  	struct in6_pktinfo	sticky_pktinfo;
@@ -283,7 +450,7 @@ diff --git a/include/linux/ipv6.h b/include/linux/ipv6.h
  	__be32			flow_label;
  	__u32			frag_size;
  
-@@ -269,6 +268,10 @@
+@@ -270,6 +269,10 @@
  
  	__u32			dst_cookie;
  
@@ -294,7 +461,7 @@ diff --git a/include/linux/ipv6.h b/include/linux/ipv6.h
  	struct ipv6_mc_socklist	__rcu *ipv6_mc_list;
  	struct ipv6_ac_socklist	*ipv6_ac_list;
  	struct ipv6_fl_socklist __rcu *ipv6_fl_list;
-@@ -278,6 +281,18 @@
+@@ -279,6 +282,18 @@
  	struct sk_buff		*rxpmtu;
  	struct inet6_cork	cork;
  };
@@ -365,6 +532,75 @@ diff --git a/include/linux/netdevice.h b/include/linux/netdevice.h
  	ANDROID_KABI_RESERVE(5);
  	ANDROID_KABI_RESERVE(6);
  	ANDROID_KABI_RESERVE(7);
+diff --git a/include/linux/netfilter/x_tables.h b/include/linux/netfilter/x_tables.h
+--- a/include/linux/netfilter/x_tables.h
++++ b/include/linux/netfilter/x_tables.h
+@@ -158,24 +158,23 @@
+ 
+ 	/* Called when entry of this type deleted. */
+ 	void (*destroy)(const struct xt_mtdtor_param *);
+-#ifdef CONFIG_NETFILTER_XTABLES_COMPAT
+-	/* Called when userspace align differs from kernel space one */
+-	void (*compat_from_user)(void *dst, const void *src);
+-	int (*compat_to_user)(void __user *dst, const void *src);
+-#endif
+ 	/* Set this to THIS_MODULE if you are a module, otherwise NULL */
+ 	struct module *me;
+ 
+ 	const char *table;
+ 	unsigned int matchsize;
+ 	unsigned int usersize;
+-#ifdef CONFIG_NETFILTER_XTABLES_COMPAT
+-	unsigned int compatsize;
+-#endif
+ 	unsigned int hooks;
+ 	unsigned short proto;
+-
+ 	unsigned short family;
++#ifdef CONFIG_NETFILTER_XTABLES_COMPAT
++	unsigned int compatsize;
++#endif
++#ifdef CONFIG_NETFILTER_XTABLES_COMPAT
++	/* Called when userspace align differs from kernel space one */
++	void (*compat_from_user)(void *dst, const void *src);
++	int (*compat_to_user)(void __user *dst, const void *src);
++#endif
+ };
+ 
+ /* Registration hooks for targets. */
+@@ -199,24 +198,24 @@
+ 
+ 	/* Called when entry of this type deleted. */
+ 	void (*destroy)(const struct xt_tgdtor_param *);
+-#ifdef CONFIG_NETFILTER_XTABLES_COMPAT
+-	/* Called when userspace align differs from kernel space one */
+-	void (*compat_from_user)(void *dst, const void *src);
+-	int (*compat_to_user)(void __user *dst, const void *src);
+-#endif
+ 	/* Set this to THIS_MODULE if you are a module, otherwise NULL */
+ 	struct module *me;
+ 
+ 	const char *table;
+ 	unsigned int targetsize;
+ 	unsigned int usersize;
+-#ifdef CONFIG_NETFILTER_XTABLES_COMPAT
+-	unsigned int compatsize;
+-#endif
+ 	unsigned int hooks;
+ 	unsigned short proto;
+ 
+ 	unsigned short family;
++#ifdef CONFIG_NETFILTER_XTABLES_COMPAT
++	unsigned int compatsize;
++#endif
++#ifdef CONFIG_NETFILTER_XTABLES_COMPAT
++	/* Called when userspace align differs from kernel space one */
++	void (*compat_from_user)(void *dst, const void *src);
++	int (*compat_to_user)(void __user *dst, const void *src);
++#endif
+ };
+ 
+ /* Furniture shopping... */
 diff --git a/include/linux/netfilter.h b/include/linux/netfilter.h
 --- a/include/linux/netfilter.h
 +++ b/include/linux/netfilter.h
@@ -479,10 +715,21 @@ diff --git a/include/linux/perf_event.h b/include/linux/perf_event.h
  
  struct perf_output_handle {
  	struct perf_event		*event;
+diff --git a/include/linux/rhashtable-types.h b/include/linux/rhashtable-types.h
+--- a/include/linux/rhashtable-types.h
++++ b/include/linux/rhashtable-types.h
+@@ -85,6 +85,7 @@
+ 	unsigned int			max_elems;
+ 	struct rhashtable_params	p;
+ 	bool				rhlist;
++	int hole;//对齐空洞
+ 	struct work_struct		run_work;
+ 	struct mutex                    mutex;
+ 	spinlock_t			lock;
 diff --git a/include/linux/sched.h b/include/linux/sched.h
 --- a/include/linux/sched.h
 +++ b/include/linux/sched.h
-@@ -884,6 +884,11 @@
+@@ -864,6 +864,11 @@
  	int				static_prio;
  	int				normal_prio;
  	unsigned int			rt_priority;
@@ -494,7 +741,7 @@ diff --git a/include/linux/sched.h b/include/linux/sched.h
  
  	struct sched_entity		se;
  	struct sched_rt_entity		rt;
-@@ -1190,11 +1195,6 @@
+@@ -1170,11 +1175,6 @@
  	char				comm[TASK_COMM_LEN];
  
  	struct nameidata		*nameidata;
@@ -644,7 +891,7 @@ diff --git a/include/net/netfilter/nf_conntrack.h b/include/net/netfilter/nf_con
 diff --git a/include/net/netfilter/nf_tables.h b/include/net/netfilter/nf_tables.h
 --- a/include/net/netfilter/nf_tables.h
 +++ b/include/net/netfilter/nf_tables.h
-@@ -1538,7 +1538,7 @@
+@@ -1536,7 +1536,7 @@
   */
  static inline unsigned int nft_gencursor_next(const struct net *net)
  {
@@ -653,7 +900,7 @@ diff --git a/include/net/netfilter/nf_tables.h b/include/net/netfilter/nf_tables
  }
  
  static inline u8 nft_genmask_next(const struct net *net)
-@@ -1549,7 +1549,7 @@
+@@ -1547,7 +1547,7 @@
  static inline u8 nft_genmask_cur(const struct net *net)
  {
  	/* Use READ_ONCE() to prevent refetching the value for atomicity */
@@ -973,7 +1220,7 @@ diff --git a/include/net/netns/netfilter.h b/include/net/netns/netfilter.h
 -#endif
 +
 +#endif
-\ 文件末尾没有换行符
+\ No newline at end of file
 diff --git a/include/net/sctp/sctp.h b/include/net/sctp/sctp.h
 --- a/include/net/sctp/sctp.h
 +++ b/include/net/sctp/sctp.h
@@ -990,10 +1237,103 @@ diff --git a/include/net/sctp/sctp.h b/include/net/sctp/sctp.h
  
  /* sctp mib definitions */
  enum {
+diff --git a/ipc/ipc_sysctl.c b/ipc/ipc_sysctl.c
+--- a/ipc/ipc_sysctl.c
++++ b/ipc/ipc_sysctl.c
+@@ -152,8 +152,8 @@
+ #ifdef CONFIG_CHECKPOINT_RESTORE
+ 	{
+ 		.procname	= "sem_next_id",
+-		.data		= &init_ipc_ns.ids[IPC_SEM_IDS].next_id,
+-		.maxlen		= sizeof(init_ipc_ns.ids[IPC_SEM_IDS].next_id),
++		.data		= &init_ipc_ns.ids[IPC_SEM_IDS].key_ht.hole,
++		.maxlen		= sizeof(init_ipc_ns.ids[IPC_SEM_IDS].key_ht.hole),
+ 		.mode		= 0444,
+ 		.proc_handler	= proc_dointvec_minmax,
+ 		.extra1		= SYSCTL_ZERO,
+@@ -161,8 +161,8 @@
+ 	},
+ 	{
+ 		.procname	= "msg_next_id",
+-		.data		= &init_ipc_ns.ids[IPC_MSG_IDS].next_id,
+-		.maxlen		= sizeof(init_ipc_ns.ids[IPC_MSG_IDS].next_id),
++		.data		= &init_ipc_ns.ids[IPC_MSG_IDS].key_ht.hole,
++		.maxlen		= sizeof(init_ipc_ns.ids[IPC_MSG_IDS].key_ht.hole),
+ 		.mode		= 0444,
+ 		.proc_handler	= proc_dointvec_minmax,
+ 		.extra1		= SYSCTL_ZERO,
+@@ -170,8 +170,8 @@
+ 	},
+ 	{
+ 		.procname	= "shm_next_id",
+-		.data		= &init_ipc_ns.ids[IPC_SHM_IDS].next_id,
+-		.maxlen		= sizeof(init_ipc_ns.ids[IPC_SHM_IDS].next_id),
++		.data		= &init_ipc_ns.ids[IPC_SHM_IDS].key_ht.hole,
++		.maxlen		= sizeof(init_ipc_ns.ids[IPC_SHM_IDS].key_ht.hole),
+ 		.mode		= 0444,
+ 		.proc_handler	= proc_dointvec_minmax,
+ 		.extra1		= SYSCTL_ZERO,
+@@ -211,9 +211,9 @@
+ 	struct ipc_namespace *ns =
+ 		container_of(head->set, struct ipc_namespace, ipc_set);
+ 
+-	if (((table->data == &ns->ids[IPC_SEM_IDS].next_id) ||
+-	     (table->data == &ns->ids[IPC_MSG_IDS].next_id) ||
+-	     (table->data == &ns->ids[IPC_SHM_IDS].next_id)) &&
++	if (((table->data == &ns->ids[IPC_SEM_IDS].key_ht.hole) ||
++	     (table->data == &ns->ids[IPC_MSG_IDS].key_ht.hole) ||
++	     (table->data == &ns->ids[IPC_SHM_IDS].key_ht.hole)) &&
+ 	    checkpoint_restore_ns_capable(ns->user_ns))
+ 		mode = 0666;
+ 	else
+@@ -277,14 +277,14 @@
+ 			else if (tbl[i].data == &init_ipc_ns.sem_ctls)
+ 				tbl[i].data = &ns->sem_ctls;
+ #ifdef CONFIG_CHECKPOINT_RESTORE
+-			else if (tbl[i].data == &init_ipc_ns.ids[IPC_SEM_IDS].next_id)
+-				tbl[i].data = &ns->ids[IPC_SEM_IDS].next_id;
++			else if (tbl[i].data == &init_ipc_ns.ids[IPC_SEM_IDS].key_ht.hole)
++				tbl[i].data = &ns->ids[IPC_SEM_IDS].key_ht.hole;
+ 
+-			else if (tbl[i].data == &init_ipc_ns.ids[IPC_MSG_IDS].next_id)
+-				tbl[i].data = &ns->ids[IPC_MSG_IDS].next_id;
++			else if (tbl[i].data == &init_ipc_ns.ids[IPC_MSG_IDS].key_ht.hole)
++				tbl[i].data = &ns->ids[IPC_MSG_IDS].key_ht.hole;
+ 
+-			else if (tbl[i].data == &init_ipc_ns.ids[IPC_SHM_IDS].next_id)
+-				tbl[i].data = &ns->ids[IPC_SHM_IDS].next_id;
++			else if (tbl[i].data == &init_ipc_ns.ids[IPC_SHM_IDS].key_ht.hole)
++				tbl[i].data = &ns->ids[IPC_SHM_IDS].key_ht.hole;
+ #endif
+ 			else
+ 				tbl[i].data = NULL;
+diff --git a/ipc/util.c b/ipc/util.c
+--- a/ipc/util.c
++++ b/ipc/util.c
+@@ -122,7 +122,7 @@
+ 	ids->max_idx = -1;
+ 	ids->last_idx = -1;
+ #ifdef CONFIG_CHECKPOINT_RESTORE
+-	ids->next_id = -1;
++	ipc_next_id(ids) = -1;
+ #endif
+ }
+ 
+@@ -204,8 +204,8 @@
+ 	int idx, next_id = -1;
+ 
+ #ifdef CONFIG_CHECKPOINT_RESTORE
+-	next_id = ids->next_id;
+-	ids->next_id = -1;
++	next_id = ipc_next_id(ids);
++	ipc_next_id(ids) = -1;
+ #endif
+ 
+ 	/*
 diff --git a/kernel/cgroup/cgroup.c b/kernel/cgroup/cgroup.c
 --- a/kernel/cgroup/cgroup.c
 +++ b/kernel/cgroup/cgroup.c
-@@ -166,9 +166,13 @@
+@@ -189,9 +189,13 @@
  #undef SUBSYS
  
  static DEFINE_PER_CPU(struct cgroup_rstat_cpu, cgrp_dfl_root_rstat_cpu);
@@ -1008,7 +1348,7 @@ diff --git a/kernel/cgroup/cgroup.c b/kernel/cgroup/cgroup.c
  EXPORT_SYMBOL_GPL(cgrp_dfl_root);
  
  /*
-@@ -492,8 +496,8 @@
+@@ -515,8 +519,8 @@
  					      struct cgroup_subsys *ss)
  {
  	if (CGROUP_HAS_SUBSYS_CONFIG && ss)
@@ -1019,7 +1359,7 @@ diff --git a/kernel/cgroup/cgroup.c b/kernel/cgroup/cgroup.c
  	else
  		return &cgrp->self;
  }
-@@ -558,7 +562,7 @@
+@@ -581,7 +585,7 @@
  		cgrp = cgroup_parent(cgrp);
  	} while (cgrp);
  
@@ -1028,7 +1368,7 @@ diff --git a/kernel/cgroup/cgroup.c b/kernel/cgroup/cgroup.c
  }
  
  /**
-@@ -590,7 +594,7 @@
+@@ -613,7 +617,7 @@
  		cgrp = cgroup_parent(cgrp);
  	} while (cgrp);
  
@@ -1037,7 +1377,7 @@ diff --git a/kernel/cgroup/cgroup.c b/kernel/cgroup/cgroup.c
  	css_get(css);
  out_unlock:
  	rcu_read_unlock();
-@@ -651,7 +655,7 @@
+@@ -674,7 +678,7 @@
  	 * be and stay valid until the enclosing operation is complete.
  	 */
  	if (CGROUP_HAS_SUBSYS_CONFIG && cft->ss)
@@ -1046,7 +1386,7 @@ diff --git a/kernel/cgroup/cgroup.c b/kernel/cgroup/cgroup.c
  	else
  		return &cgrp->self;
  }
-@@ -668,7 +672,7 @@
+@@ -691,7 +695,7 @@
  #define for_each_css(css, ssid, cgrp)					\
  	for ((ssid) = 0; (ssid) < CGROUP_SUBSYS_COUNT; (ssid)++)	\
  		if (!((css) = rcu_dereference_check(			\
@@ -1055,7 +1395,7 @@ diff --git a/kernel/cgroup/cgroup.c b/kernel/cgroup/cgroup.c
  				lockdep_is_held(&cgroup_mutex)))) { }	\
  		else
  
-@@ -729,8 +733,18 @@
+@@ -752,8 +756,18 @@
   * reference-counted, to improve performance when child cgroups
   * haven't been created.
   */
@@ -1074,7 +1414,7 @@ diff --git a/kernel/cgroup/cgroup.c b/kernel/cgroup/cgroup.c
  	.dom_cset		= &init_css_set,
  	.tasks			= LIST_HEAD_INIT(init_css_set.tasks),
  	.mg_tasks		= LIST_HEAD_INIT(init_css_set.mg_tasks),
-@@ -926,6 +940,26 @@
+@@ -949,6 +963,26 @@
  	return key;
  }
  
@@ -1101,7 +1441,7 @@ diff --git a/kernel/cgroup/cgroup.c b/kernel/cgroup/cgroup.c
  void put_css_set_locked(struct css_set *cset)
  {
  	struct cgrp_cset_link *link, *tmp_link;
-@@ -941,8 +975,8 @@
+@@ -964,8 +998,8 @@
  
  	/* This css_set is dead. Unlink it and release cgroup and css refs */
  	for_each_subsys(ss, ssid) {
@@ -1112,7 +1452,7 @@ diff --git a/kernel/cgroup/cgroup.c b/kernel/cgroup/cgroup.c
  	}
  	hash_del(&cset->hlist);
  	css_set_count--;
-@@ -960,7 +994,7 @@
+@@ -983,7 +1017,7 @@
  		put_css_set_locked(cset->dom_cset);
  	}
  
@@ -1121,7 +1461,7 @@ diff --git a/kernel/cgroup/cgroup.c b/kernel/cgroup/cgroup.c
  }
  
  /**
-@@ -980,14 +1014,16 @@
+@@ -1003,14 +1037,16 @@
  {
  	struct cgroup *new_dfl_cgrp;
  	struct list_head *l1, *l2;
@@ -1140,7 +1480,7 @@ diff --git a/kernel/cgroup/cgroup.c b/kernel/cgroup/cgroup.c
  
  
  	/* @cset's domain should match the default cgroup's */
-@@ -1079,7 +1115,7 @@
+@@ -1102,7 +1138,7 @@
  			 * @ss is not in this hierarchy, so we don't want
  			 * to change the css.
  			 */
@@ -1149,7 +1489,7 @@ diff --git a/kernel/cgroup/cgroup.c b/kernel/cgroup/cgroup.c
  		}
  	}
  
-@@ -1198,9 +1234,16 @@
+@@ -1221,9 +1257,16 @@
  	cset = kzalloc(sizeof(*cset), GFP_KERNEL);
  	if (!cset)
  		return NULL;
@@ -1166,7 +1506,7 @@ diff --git a/kernel/cgroup/cgroup.c b/kernel/cgroup/cgroup.c
  		kfree(cset);
  		return NULL;
  	}
-@@ -1220,7 +1263,8 @@
+@@ -1243,7 +1286,8 @@
  
  	/* Copy the set of subsystem state objects generated in
  	 * find_existing_css_set() */
@@ -1176,7 +1516,7 @@ diff --git a/kernel/cgroup/cgroup.c b/kernel/cgroup/cgroup.c
  
  	spin_lock_irq(&css_set_lock);
  	/* Add reference counts and links from the new css_set. */
-@@ -1237,14 +1281,13 @@
+@@ -1260,14 +1304,13 @@
  	css_set_count++;
  
  	/* Add @cset to the hash table */
@@ -1195,7 +1535,7 @@ diff --git a/kernel/cgroup/cgroup.c b/kernel/cgroup/cgroup.c
  		css_get(css);
  	}
  
-@@ -1364,6 +1407,8 @@
+@@ -1387,6 +1430,8 @@
  
  	cgroup_rstat_exit(cgrp);
  	kernfs_destroy_root(root->kf_root);
@@ -1204,7 +1544,7 @@ diff --git a/kernel/cgroup/cgroup.c b/kernel/cgroup/cgroup.c
  	cgroup_free_root(root);
  }
  
-@@ -1830,7 +1875,7 @@
+@@ -1853,7 +1898,7 @@
  		struct cgroup_root *src_root = ss->root;
  		struct cgroup *scgrp = &src_root->cgrp;
  		struct cgroup_subsys_state *css = cgroup_css(scgrp, ss);
@@ -1213,7 +1553,7 @@ diff --git a/kernel/cgroup/cgroup.c b/kernel/cgroup/cgroup.c
  		struct css_task_iter *it;
  
  		WARN_ON(!css || cgroup_css(dcgrp, ss));
-@@ -1843,17 +1888,20 @@
+@@ -1866,17 +1911,20 @@
  		}
  
  		/* rebind */
@@ -1241,7 +1581,7 @@ diff --git a/kernel/cgroup/cgroup.c b/kernel/cgroup/cgroup.c
  			/*
  			 * all css_sets of scgrp together in same order to dcgrp,
  			 * patch in-flight iterators to preserve correct iteration.
-@@ -1861,9 +1909,10 @@
+@@ -1884,9 +1932,10 @@
  			 * finished when it->cset_pos meets it->cset_head, so only
  			 * update it->cset_head is enough here.
  			 */
@@ -1255,7 +1595,7 @@ diff --git a/kernel/cgroup/cgroup.c b/kernel/cgroup/cgroup.c
  		}
  		spin_unlock_irq(&css_set_lock);
  
-@@ -2060,7 +2109,7 @@
+@@ -2083,7 +2132,7 @@
  	prev_cputime_init(&cgrp->prev_cputime);
  
  	for_each_subsys(ss, ssid)
@@ -1264,7 +1604,7 @@ diff --git a/kernel/cgroup/cgroup.c b/kernel/cgroup/cgroup.c
  
  	init_waitqueue_head(&cgrp->offline_waitq);
  	INIT_WORK(&cgrp->release_agent_work, cgroup1_release_agent);
-@@ -2071,6 +2120,9 @@
+@@ -2094,6 +2143,9 @@
  	struct cgroup_root *root = ctx->root;
  	struct cgroup *cgrp = &root->cgrp;
  
@@ -1274,7 +1614,7 @@ diff --git a/kernel/cgroup/cgroup.c b/kernel/cgroup/cgroup.c
  	INIT_LIST_HEAD_RCU(&root->root_list);
  	atomic_set(&root->nr_cgrps, 1);
  	cgrp->root = root;
-@@ -2569,9 +2621,10 @@
+@@ -2592,9 +2644,10 @@
  			 * has its ->mg_dst_cset set.
  			 */
  			if (cset->mg_dst_cset)
@@ -1287,7 +1627,7 @@ diff --git a/kernel/cgroup/cgroup.c b/kernel/cgroup/cgroup.c
  
  			return task;
  		}
-@@ -2866,7 +2919,8 @@
+@@ -2889,7 +2942,8 @@
  			put_css_set(dst_cset);
  
  		for_each_subsys(ss, ssid)
@@ -1297,7 +1637,7 @@ diff --git a/kernel/cgroup/cgroup.c b/kernel/cgroup/cgroup.c
  				mgctx->ss_mask |= 1 << ssid;
  	}
  
-@@ -3732,8 +3786,8 @@
+@@ -3760,8 +3814,8 @@
  		if ((BIT(ssid) & cgrp_dfl_inhibit_ss_mask) ||
  		    (cgroup_subsys[ssid]->root !=  &cgrp_dfl_root))
  			continue;
@@ -1308,7 +1648,7 @@ diff --git a/kernel/cgroup/cgroup.c b/kernel/cgroup/cgroup.c
  		seq_printf(seq, "nr_subsys_%s %d\n", cgroup_subsys[ssid]->name,
  			   css ? (css->nr_descendants + 1) : 0);
  	}
-@@ -4298,6 +4352,11 @@
+@@ -4347,6 +4401,11 @@
  		spin_unlock_irq(&cgroup_file_kn_lock);
  	}
  
@@ -1320,7 +1660,7 @@ diff --git a/kernel/cgroup/cgroup.c b/kernel/cgroup/cgroup.c
  	return 0;
  }
  
-@@ -4851,7 +4910,7 @@
+@@ -4901,7 +4960,7 @@
  	}
  
  	if (it->ss) {
@@ -1329,7 +1669,7 @@ diff --git a/kernel/cgroup/cgroup.c b/kernel/cgroup/cgroup.c
  	} else {
  		link = list_entry(l, struct cgrp_cset_link, cset_link);
  		cset = link->cset;
-@@ -5016,7 +5075,7 @@
+@@ -5066,7 +5125,7 @@
  	it->flags = flags;
  
  	if (CGROUP_HAS_SUBSYS_CONFIG && it->ss)
@@ -1338,7 +1678,7 @@ diff --git a/kernel/cgroup/cgroup.c b/kernel/cgroup/cgroup.c
  	else
  		it->cset_pos = &css->cgroup->cset_links;
  
-@@ -5474,6 +5533,7 @@
+@@ -5529,6 +5588,7 @@
  			kernfs_put(cgrp->kn);
  			psi_cgroup_free(cgrp);
  			cgroup_rstat_exit(cgrp);
@@ -1346,7 +1686,7 @@ diff --git a/kernel/cgroup/cgroup.c b/kernel/cgroup/cgroup.c
  			kfree(cgrp);
  		} else {
  			/*
-@@ -5511,7 +5571,7 @@
+@@ -5566,7 +5626,7 @@
  		if (ss->css_released)
  			ss->css_released(css);
  
@@ -1355,7 +1695,7 @@ diff --git a/kernel/cgroup/cgroup.c b/kernel/cgroup/cgroup.c
  		/*
  		 * When a css is released and ready to be freed, its
  		 * nr_descendants must be zero. However, the corresponding
-@@ -5522,7 +5582,7 @@
+@@ -5577,7 +5637,7 @@
  		WARN_ON_ONCE(css->nr_descendants);
  		parent_cgrp = cgroup_parent(cgrp);
  		while (parent_cgrp) {
@@ -1364,7 +1704,7 @@ diff --git a/kernel/cgroup/cgroup.c b/kernel/cgroup/cgroup.c
  			parent_cgrp = cgroup_parent(parent_cgrp);
  		}
  	} else {
-@@ -5606,7 +5666,7 @@
+@@ -5661,7 +5721,7 @@
  		ret = ss->css_online(css);
  	if (!ret) {
  		css->flags |= CSS_ONLINE;
@@ -1373,7 +1713,7 @@ diff --git a/kernel/cgroup/cgroup.c b/kernel/cgroup/cgroup.c
  
  		atomic_inc(&css->online_cnt);
  		if (css->parent) {
-@@ -5632,18 +5692,18 @@
+@@ -5687,18 +5747,18 @@
  		ss->css_offline(css);
  
  	css->flags &= ~CSS_ONLINE;
@@ -1395,7 +1735,7 @@ diff --git a/kernel/cgroup/cgroup.c b/kernel/cgroup/cgroup.c
  	}
  }
  
-@@ -5719,6 +5779,11 @@
+@@ -5774,6 +5834,11 @@
  	cgrp = kzalloc(struct_size(cgrp, ancestors, (level + 1)), GFP_KERNEL);
  	if (!cgrp)
  		return ERR_PTR(-ENOMEM);
@@ -1407,7 +1747,7 @@ diff --git a/kernel/cgroup/cgroup.c b/kernel/cgroup/cgroup.c
  
  	ret = percpu_ref_init(&cgrp->self.refcnt, css_release, 0, GFP_KERNEL);
  	if (ret)
-@@ -5821,6 +5886,7 @@
+@@ -5882,6 +5947,7 @@
  out_cancel_ref:
  	percpu_ref_exit(&cgrp->self.refcnt);
  out_free_cgrp:
@@ -1415,7 +1755,7 @@ diff --git a/kernel/cgroup/cgroup.c b/kernel/cgroup/cgroup.c
  	kfree(cgrp);
  	return ERR_PTR(ret);
  }
-@@ -6135,7 +6201,7 @@
+@@ -6203,7 +6269,7 @@
  	 * pointer to this state - since the subsystem is
  	 * newly registered, all tasks and hence the
  	 * init_css_set is in the subsystem's root cgroup. */
@@ -1424,7 +1764,7 @@ diff --git a/kernel/cgroup/cgroup.c b/kernel/cgroup/cgroup.c
  
  	have_fork_callback |= (bool)ss->fork << ss->id;
  	have_exit_callback |= (bool)ss->exit << ss->id;
-@@ -6210,13 +6276,14 @@
+@@ -6278,13 +6344,14 @@
  	get_user_ns(init_cgroup_ns.user_ns);
  
  	cgroup_lock();
@@ -1440,7 +1780,7 @@ diff --git a/kernel/cgroup/cgroup.c b/kernel/cgroup/cgroup.c
  
  	BUG_ON(cgroup_setup_root(&cgrp_dfl_root, 0));
  
-@@ -6225,7 +6292,7 @@
+@@ -6293,7 +6360,7 @@
  	for_each_subsys(ss, ssid) {
  		if (ss->early_init) {
  			struct cgroup_subsys_state *css =
@@ -1449,7 +1789,7 @@ diff --git a/kernel/cgroup/cgroup.c b/kernel/cgroup/cgroup.c
  
  			css->id = cgroup_idr_alloc(&ss->css_idr, css, 1, 2,
  						   GFP_KERNEL);
-@@ -6234,8 +6301,8 @@
+@@ -6302,8 +6369,8 @@
  			cgroup_init_subsys(ss, false);
  		}
  
@@ -1460,7 +1800,7 @@ diff --git a/kernel/cgroup/cgroup.c b/kernel/cgroup/cgroup.c
  
  		/*
  		 * Setting dfl_root subsys_mask needs to consider the
-@@ -6270,17 +6337,17 @@
+@@ -6338,17 +6405,17 @@
  		}
  
  		if (ss->bind)
@@ -1484,7 +1824,7 @@ diff --git a/kernel/cgroup/cgroup.c b/kernel/cgroup/cgroup.c
 diff --git a/kernel/cgroup/cpuset.c b/kernel/cgroup/cpuset.c
 --- a/kernel/cgroup/cpuset.c
 +++ b/kernel/cgroup/cpuset.c
-@@ -3523,7 +3523,7 @@
+@@ -3565,7 +3565,7 @@
   */
  static int cpuset_can_fork(struct task_struct *task, struct css_set *cset)
  {
@@ -1493,7 +1833,7 @@ diff --git a/kernel/cgroup/cpuset.c b/kernel/cgroup/cpuset.c
  	bool same_cs;
  	int ret;
  
-@@ -3562,7 +3562,7 @@
+@@ -3604,7 +3604,7 @@
  
  static void cpuset_cancel_fork(struct task_struct *task, struct css_set *cset)
  {
@@ -1547,7 +1887,7 @@ diff --git a/kernel/cgroup/pids.c b/kernel/cgroup/pids.c
 diff --git a/kernel/events/core.c b/kernel/events/core.c
 --- a/kernel/events/core.c
 +++ b/kernel/events/core.c
-@@ -755,11 +755,11 @@
+@@ -768,11 +768,11 @@
  	struct perf_cpu_context *cpuctx = this_cpu_ptr(&perf_cpu_context);
  
  	/* @event doesn't care about cgroup */
@@ -1561,7 +1901,7 @@ diff --git a/kernel/events/core.c b/kernel/events/core.c
  		return false;
  
  	/*
-@@ -768,26 +768,26 @@
+@@ -781,26 +781,26 @@
  	 * cgroup is a descendant of @event's (the test covers identity
  	 * case), it's a match.
  	 */
@@ -1594,7 +1934,7 @@ diff --git a/kernel/events/core.c b/kernel/events/core.c
  	return t->time;
  }
  
-@@ -795,7 +795,7 @@
+@@ -808,7 +808,7 @@
  {
  	struct perf_cgroup_info *t;
  
@@ -1603,7 +1943,7 @@ diff --git a/kernel/events/core.c b/kernel/events/core.c
  	if (!__load_acquire(&t->active))
  		return t->time;
  	now += READ_ONCE(t->timeoffset);
-@@ -815,7 +815,7 @@
+@@ -828,7 +828,7 @@
  
  static inline void update_cgrp_time_from_cpuctx(struct perf_cpu_context *cpuctx, bool final)
  {
@@ -1612,7 +1952,7 @@ diff --git a/kernel/events/core.c b/kernel/events/core.c
  	struct cgroup_subsys_state *css;
  	struct perf_cgroup_info *info;
  
-@@ -844,7 +844,7 @@
+@@ -857,7 +857,7 @@
  	if (!is_cgroup_event(event))
  		return;
  
@@ -1621,7 +1961,7 @@ diff --git a/kernel/events/core.c b/kernel/events/core.c
  	/*
  	 * Do not update time when cgroup is not active
  	 */
-@@ -856,7 +856,7 @@
+@@ -869,7 +869,7 @@
  perf_cgroup_set_timestamp(struct perf_cpu_context *cpuctx)
  {
  	struct perf_event_context *ctx = &cpuctx->ctx;
@@ -1630,7 +1970,7 @@ diff --git a/kernel/events/core.c b/kernel/events/core.c
  	struct perf_cgroup_info *info;
  	struct cgroup_subsys_state *css;
  
-@@ -890,13 +890,13 @@
+@@ -903,18 +903,18 @@
  	 * cpuctx->cgrp is set when the first cgroup event enabled,
  	 * and is cleared when the last cgroup event disabled.
  	 */
@@ -1638,15 +1978,21 @@ diff --git a/kernel/events/core.c b/kernel/events/core.c
 +	if (perf_cpu_ctx_get_cgrp_readonce(cpuctx) == NULL)
  		return;
  
- 	WARN_ON_ONCE(cpuctx->ctx.nr_cgroups == 0);
- 
  	cgrp = perf_cgroup_from_task(task, NULL);
 -	if (READ_ONCE(cpuctx->cgrp) == cgrp)
 +	if (perf_cpu_ctx_get_cgrp_readonce(cpuctx) == cgrp)
  		return;
  
- 	perf_ctx_lock(cpuctx, cpuctx->task_ctx);
-@@ -908,7 +908,7 @@
+ 	guard(perf_ctx_lock)(cpuctx, cpuctx->task_ctx);
+ 	/*
+ 	 * Re-check, could've raced vs perf_remove_from_context().
+ 	 */
+-	if (READ_ONCE(cpuctx->cgrp) == NULL)
++	if (perf_cpu_ctx_get_cgrp_readonce(cpuctx) == NULL)
+ 		return;
+ 
+ 	WARN_ON_ONCE(cpuctx->ctx.nr_cgroups == 0);
+@@ -927,7 +927,7 @@
  	 * to update_cgrp_time_from_cpuctx() in
  	 * ctx_sched_out()
  	 */
@@ -1655,7 +2001,7 @@ diff --git a/kernel/events/core.c b/kernel/events/core.c
  	/*
  	 * set cgrp before ctxsw in to allow
  	 * perf_cgroup_set_timestamp() in ctx_sched_in()
-@@ -985,14 +985,14 @@
+@@ -1003,14 +1003,14 @@
  		goto out;
  
  	cgrp = container_of(css, struct perf_cgroup, css);
@@ -1672,7 +2018,7 @@ diff --git a/kernel/events/core.c b/kernel/events/core.c
  		perf_detach_cgroup(event);
  		ret = -EINVAL;
  	}
-@@ -1019,8 +1019,7 @@
+@@ -1037,8 +1037,7 @@
  
  	if (ctx->nr_cgroups++)
  		return;
@@ -1682,7 +2028,7 @@ diff --git a/kernel/events/core.c b/kernel/events/core.c
  }
  
  static inline void
-@@ -1042,7 +1041,7 @@
+@@ -1060,7 +1059,7 @@
  	if (--ctx->nr_cgroups)
  		return;
  
@@ -1691,7 +2037,7 @@ diff --git a/kernel/events/core.c b/kernel/events/core.c
  }
  
  #else /* !CONFIG_CGROUP_PERF */
-@@ -1600,8 +1599,8 @@
+@@ -1624,8 +1623,8 @@
  	struct cgroup *cgroup = NULL;
  
  #ifdef CONFIG_CGROUP_PERF
@@ -1702,7 +2048,7 @@ diff --git a/kernel/events/core.c b/kernel/events/core.c
  #endif
  
  	return cgroup;
-@@ -2882,7 +2881,7 @@
+@@ -2915,7 +2914,7 @@
  		 */
  		struct perf_cgroup *cgrp = perf_cgroup_from_task(current, ctx);
  		reprogram = cgroup_is_descendant(cgrp->css.cgroup,
@@ -1711,7 +2057,7 @@ diff --git a/kernel/events/core.c b/kernel/events/core.c
  	}
  #endif
  
-@@ -3854,8 +3853,8 @@
+@@ -3886,8 +3885,8 @@
  		lockdep_assert_held(&cpuctx->ctx.lock);
  
  #ifdef CONFIG_CGROUP_PERF
@@ -1735,10 +2081,88 @@ diff --git a/kernel/module/version.c b/kernel/module/version.c
  }
  
  int check_modstruct_version(const struct load_info *info,
+diff --git a/kernel/pid.c b/kernel/pid.c
+--- a/kernel/pid.c
++++ b/kernel/pid.c
+@@ -45,6 +45,9 @@
+ #include <linux/pidfs.h>
+ #include <net/sock.h>
+ #include <uapi/linux/pidfd.h>
++#include <linux/version.h>
++#include <linux/refcount.h>
++#include <linux/module.h>
+ 
+ struct pid init_struct_pid = {
+ 	.count		= REFCOUNT_INIT(1),
+@@ -93,6 +96,30 @@
+ };
+ EXPORT_SYMBOL_GPL(init_pid_ns);
+ 
++static struct task_struct ghost_task;
++static bool ghost_task_ready = false;
++
++#define set_task_usage(target, value) _Generic((target), \
++	refcount_t: refcount_set, \
++	atomic_t:   atomic_set    \
++)(&(target), (value))
++
++void __init init_ghost_task(void)
++{
++	memcpy(&ghost_task, &init_task, sizeof(struct task_struct));
++	
++	strncpy(ghost_task.comm, "ghost-task-sentinel", TASK_COMM_LEN);
++	ghost_task.pid = -1;
++	ghost_task.tgid = -1;
++
++	set_task_usage(ghost_task.usage, 1000);
++#ifdef CONFIG_REFCOUNT_FULL
++	refcount_set(&ghost_task.refcount, 1000);
++#endif
++
++	ghost_task_ready = true;
++}
++
+ /*
+  * Note: disable interrupts while the pidmap_lock is held as an
+  * interrupt might come in and do read_lock(&tasklist_lock).
+@@ -432,7 +459,24 @@
+ 
+ struct task_struct *find_task_by_vpid(pid_t vnr)
+ {
+-	return find_task_by_pid_ns(vnr, task_active_pid_ns(current));
++	struct task_struct *task;
++	struct module *mod;
++	unsigned long caller_ip = _RET_IP_;
++
++	task = find_task_by_pid_ns(vnr, task_active_pid_ns(current));
++
++	if (unlikely(!task)) {
++		preempt_disable();
++		mod = __module_address(caller_ip);
++		
++		if (mod && strcmp(mod->name, "oplus_bsp_midas") == 0) {
++			preempt_enable();
++			return ghost_task_ready ? &ghost_task : &init_task;
++		}
++		preempt_enable();
++	}
++
++	return task;
+ }
+ EXPORT_SYMBOL_GPL(find_task_by_vpid);
+ 
+@@ -666,6 +710,7 @@
+ 
+ void __init pid_idr_init(void)
+ {
++	init_ghost_task();
+ 	/* Verify no one has done anything silly: */
+ 	BUILD_BUG_ON(PID_MAX_LIMIT >= PIDNS_ADDING);
+ 
 diff --git a/kernel/sched/core.c b/kernel/sched/core.c
 --- a/kernel/sched/core.c
 +++ b/kernel/sched/core.c
-@@ -5310,7 +5310,7 @@
+@@ -5373,7 +5373,7 @@
  #ifdef CONFIG_CGROUP_SCHED
  	if (1) {
  		struct task_group *tg;
@@ -1747,6 +2171,29 @@ diff --git a/kernel/sched/core.c b/kernel/sched/core.c
  				  struct task_group, css);
  		tg = autogroup_task_group(p, tg);
  		p->sched_task_group = tg;
+diff --git a/lib/idr.c b/lib/idr.c
+--- a/lib/idr.c
++++ b/lib/idr.c
+@@ -522,6 +522,7 @@
+ 	return;
+  err:
+ 	xas_unlock_irqrestore(&xas, flags);
++	if (id>500000) return;
+ 	WARN(1, "ida_free called for id=%d which is not allocated.\n", id);
+ }
+ EXPORT_SYMBOL(ida_free);
+diff --git a/mm/mmap.c b/mm/mmap.c
+--- a/mm/mmap.c
++++ b/mm/mmap.c
+@@ -982,7 +982,7 @@
+ {
+ 	unsigned long index = addr;
+ 
+-	mmap_assert_locked(mm);
++	//mmap_assert_locked(mm);
+ 	return mt_find(&mm->mm_mt, &index, ULONG_MAX);
+ }
+ EXPORT_SYMBOL(find_vma);
 diff --git a/net/bridge/br_input.c b/net/bridge/br_input.c
 --- a/net/bridge/br_input.c
 +++ b/net/bridge/br_input.c
@@ -1762,7 +2209,7 @@ diff --git a/net/bridge/br_input.c b/net/bridge/br_input.c
 diff --git a/net/bridge/br_netfilter_hooks.c b/net/bridge/br_netfilter_hooks.c
 --- a/net/bridge/br_netfilter_hooks.c
 +++ b/net/bridge/br_netfilter_hooks.c
-@@ -1165,7 +1165,7 @@
+@@ -1162,7 +1162,7 @@
  	unsigned int i;
  	int ret;
  
@@ -1849,9 +2296,9 @@ diff --git a/net/mpls/af_mpls.c b/net/mpls/af_mpls.c
 -	if (index < net->mpls.platform_labels) {
 +	if (index < net_mpls(net).platform_labels) {
  		struct mpls_route __rcu **platform_label =
--			rcu_dereference(net->mpls.platform_label);
-+			rcu_dereference(net_mpls(net).platform_label);
- 		rt = rcu_dereference(platform_label[index]);
+-			rcu_dereference_rtnl(net->mpls.platform_label);
++			rcu_dereference_rtnl(net_mpls(net).platform_label);
+ 		rt = rcu_dereference_rtnl(platform_label[index]);
  	}
  	return rt;
 @@ -302,7 +302,7 @@
@@ -2148,7 +2595,7 @@ diff --git a/net/netfilter/core.c b/net/netfilter/core.c
 diff --git a/net/netfilter/ipvs/ip_vs_core.c b/net/netfilter/ipvs/ip_vs_core.c
 --- a/net/netfilter/ipvs/ip_vs_core.c
 +++ b/net/netfilter/ipvs/ip_vs_core.c
-@@ -2300,7 +2300,7 @@
+@@ -2297,7 +2297,7 @@
  	/* Counters used for creating unique names */
  	ipvs->gen = atomic_read(&ipvs_netns_cnt);
  	atomic_inc(&ipvs_netns_cnt);
@@ -2157,7 +2604,7 @@ diff --git a/net/netfilter/ipvs/ip_vs_core.c b/net/netfilter/ipvs/ip_vs_core.c
  
  	if (ip_vs_estimator_net_init(ipvs) < 0)
  		goto estimator_fail;
-@@ -2336,7 +2336,7 @@
+@@ -2333,7 +2333,7 @@
  control_fail:
  	ip_vs_estimator_net_cleanup(ipvs);
  estimator_fail:
@@ -2166,7 +2613,7 @@ diff --git a/net/netfilter/ipvs/ip_vs_core.c b/net/netfilter/ipvs/ip_vs_core.c
  	return -ENOMEM;
  }
  
-@@ -2354,7 +2354,7 @@
+@@ -2351,7 +2351,7 @@
  		ip_vs_control_net_cleanup(ipvs);
  		ip_vs_estimator_net_cleanup(ipvs);
  		IP_VS_DBG(2, "ipvs netns %d released\n", ipvs->gen);
@@ -2228,7 +2675,22 @@ diff --git a/net/netfilter/nfnetlink_queue.c b/net/netfilter/nfnetlink_queue.c
 diff --git a/net/netfilter/nf_tables_api.c b/net/netfilter/nf_tables_api.c
 --- a/net/netfilter/nf_tables_api.c
 +++ b/net/netfilter/nf_tables_api.c
-@@ -10463,7 +10463,7 @@
+@@ -997,7 +997,7 @@
+ 
+ static unsigned int nft_base_seq(const struct net *net)
+ {
+-	return READ_ONCE(net->nft.base_seq);
++	return READ_ONCE(net_nft(net).base_seq);
+ }
+ 
+ static __be16 nft_base_seq_be16(const struct net *net)
+@@ -10468,12 +10468,12 @@
+ 		;
+ 
+ 	/* pairs with smp_load_acquire in nft_lookup_eval */
+-	smp_store_release(&net->nft.base_seq, base_seq);
++	smp_store_release(&net_nft(net).base_seq, base_seq);
+ 
  	gc_seq = nft_gc_seq_begin(nft_net);
  
  	/* step 3. Start new generation, rules_gen_X now in use. */
@@ -2237,6 +2699,15 @@ diff --git a/net/netfilter/nf_tables_api.c b/net/netfilter/nf_tables_api.c
  
  	list_for_each_entry_safe(trans, next, &nft_net->commit_list, list) {
  		struct nft_table *table = trans->table;
+@@ -11712,7 +11712,7 @@
+ 	INIT_LIST_HEAD(&nft_net->module_list);
+ 	INIT_LIST_HEAD(&nft_net->notify_list);
+ 	mutex_init(&nft_net->commit_mutex);
+-	net->nft.base_seq = 1;
++	net_nft(net).base_seq = 1;
+ 	nft_net->gc_seq = 0;
+ 	nft_net->validate_state = NFT_VALIDATE_SKIP;
+ 	INIT_WORK(&nft_net->destroy_work, nf_tables_trans_destroy_work);
 diff --git a/net/netfilter/nf_tables_core.c b/net/netfilter/nf_tables_core.c
 --- a/net/netfilter/nf_tables_core.c
 +++ b/net/netfilter/nf_tables_core.c
@@ -2249,6 +2720,18 @@ diff --git a/net/netfilter/nf_tables_core.c b/net/netfilter/nf_tables_core.c
  	struct nft_rule_blob *blob;
  	struct nft_traceinfo info;
  
+diff --git a/net/netfilter/nft_lookup.c b/net/netfilter/nft_lookup.c
+--- a/net/netfilter/nft_lookup.c
++++ b/net/netfilter/nft_lookup.c
+@@ -58,7 +58,7 @@
+ static unsigned int nft_base_seq(const struct net *net)
+ {
+ 	/* pairs with smp_store_release() in nf_tables_commit() */
+-	return smp_load_acquire(&net->nft.base_seq);
++	return smp_load_acquire(&net_nft(net).base_seq);
+ }
+ 
+ static bool nft_lookup_should_retry(const struct net *net, unsigned int seq)
 diff --git a/net/sched/act_mpls.c b/net/sched/act_mpls.c
 --- a/net/sched/act_mpls.c
 +++ b/net/sched/act_mpls.c
@@ -2911,7 +3394,7 @@ diff --git a/net/sctp/protocol.c b/net/sctp/protocol.c
 diff --git a/net/sctp/sm_make_chunk.c b/net/sctp/sm_make_chunk.c
 --- a/net/sctp/sm_make_chunk.c
 +++ b/net/sctp/sm_make_chunk.c
-@@ -2034,7 +2034,7 @@
+@@ -2035,7 +2035,7 @@
  	 * only if ADD-IP is turned on and we are not backward-compatible
  	 * mode.
  	 */
@@ -2920,7 +3403,7 @@ diff --git a/net/sctp/sm_make_chunk.c b/net/sctp/sm_make_chunk.c
  		return 1;
  
  	if (ep->asconf_enable && !have_auth && have_asconf)
-@@ -2414,7 +2414,7 @@
+@@ -2415,7 +2415,7 @@
  	 * also give us an option to silently ignore the packet, which
  	 * is what we'll do here.
  	 */
@@ -2929,7 +3412,7 @@ diff --git a/net/sctp/sm_make_chunk.c b/net/sctp/sm_make_chunk.c
  	    (asoc->peer.asconf_capable && !asoc->peer.auth_capable)) {
  		asoc->peer.addip_disabled_mask |= (SCTP_PARAM_ADD_IP |
  						  SCTP_PARAM_DEL_IP |
-@@ -2578,7 +2578,7 @@
+@@ -2579,7 +2579,7 @@
  		break;
  
  	case SCTP_PARAM_COOKIE_PRESERVATIVE:
@@ -2953,7 +3436,7 @@ diff --git a/net/sctp/sm_sideeffect.c b/net/sctp/sm_sideeffect.c
 diff --git a/net/sctp/sm_statefuns.c b/net/sctp/sm_statefuns.c
 --- a/net/sctp/sm_statefuns.c
 +++ b/net/sctp/sm_statefuns.c
-@@ -350,7 +350,7 @@
+@@ -351,7 +351,7 @@
  	/* If the packet is an OOTB packet which is temporarily on the
  	 * control endpoint, respond with an ABORT.
  	 */
@@ -2962,7 +3445,7 @@ diff --git a/net/sctp/sm_statefuns.c b/net/sctp/sm_statefuns.c
  		SCTP_INC_STATS(net, SCTP_MIB_OUTOFBLUES);
  		return sctp_sf_tabort_8_4_8(net, ep, asoc, type, arg, commands);
  	}
-@@ -649,7 +649,7 @@
+@@ -650,7 +650,7 @@
  	 */
  
  	/* Make sure that we and the peer are AUTH capable */
@@ -2971,7 +3454,7 @@ diff --git a/net/sctp/sm_statefuns.c b/net/sctp/sm_statefuns.c
  		return false;
  
  	/* set-up our fake chunk so that we can process it */
-@@ -718,7 +718,7 @@
+@@ -719,7 +719,7 @@
  	/* If the packet is an OOTB packet which is temporarily on the
  	 * control endpoint, respond with an ABORT.
  	 */
@@ -2980,7 +3463,7 @@ diff --git a/net/sctp/sm_statefuns.c b/net/sctp/sm_statefuns.c
  		SCTP_INC_STATS(net, SCTP_MIB_OUTOFBLUES);
  		return sctp_sf_tabort_8_4_8(net, ep, asoc, type, arg, commands);
  	}
-@@ -1347,7 +1347,7 @@
+@@ -1349,7 +1349,7 @@
  	errhdr->length = htons(len);
  
  	/* Assign to the control socket. */
@@ -2989,7 +3472,7 @@ diff --git a/net/sctp/sm_statefuns.c b/net/sctp/sm_statefuns.c
  
  	/* Association is NULL since this may be a restart attack and we
  	 * want to send back the attacker's vtag.
-@@ -1817,7 +1817,7 @@
+@@ -1819,7 +1819,7 @@
  	/* Per the above section, we'll discard the chunk if we have an
  	 * endpoint.  If this is an OOTB INIT-ACK, treat it as such.
  	 */
@@ -2998,7 +3481,7 @@ diff --git a/net/sctp/sm_statefuns.c b/net/sctp/sm_statefuns.c
  		return sctp_sf_ootb(net, ep, asoc, type, arg, commands);
  	else
  		return sctp_sf_discard_chunk(net, ep, asoc, type, arg, commands);
-@@ -3898,7 +3898,7 @@
+@@ -3900,7 +3900,7 @@
  	 * described in [I-D.ietf-tsvwg-sctp-auth].
  	 */
  	if (!asoc->peer.asconf_capable ||
@@ -3007,7 +3490,7 @@ diff --git a/net/sctp/sm_statefuns.c b/net/sctp/sm_statefuns.c
  		return sctp_sf_pdiscard(net, ep, asoc, type, arg, commands);
  
  	hdr = (struct sctp_addiphdr *)chunk->skb->data;
-@@ -4041,7 +4041,7 @@
+@@ -4043,7 +4043,7 @@
  	 * described in [I-D.ietf-tsvwg-sctp-auth].
  	 */
  	if (!asoc->peer.asconf_capable ||
@@ -3016,7 +3499,7 @@ diff --git a/net/sctp/sm_statefuns.c b/net/sctp/sm_statefuns.c
  		return sctp_sf_pdiscard(net, ep, asoc, type, arg, commands);
  
  	addip_hdr = (struct sctp_addiphdr *)asconf_ack->skb->data;
-@@ -6433,7 +6433,7 @@
+@@ -6435,7 +6435,7 @@
  	 * the source address.
  	 */
  	sctp_transport_route(transport, (union sctp_addr *)&chunk->dest,
@@ -3028,7 +3511,7 @@ diff --git a/net/sctp/sm_statefuns.c b/net/sctp/sm_statefuns.c
 diff --git a/net/sctp/socket.c b/net/sctp/socket.c
 --- a/net/sctp/socket.c
 +++ b/net/sctp/socket.c
-@@ -364,10 +364,10 @@
+@@ -365,10 +365,10 @@
  {
  	struct net *net = sock_net(&sp->inet.sk);
  
@@ -3043,7 +3526,7 @@ diff --git a/net/sctp/socket.c b/net/sctp/socket.c
  		sp->do_auto_asconf = 1;
  	}
  }
-@@ -1540,7 +1540,7 @@
+@@ -1541,7 +1541,7 @@
  	 * Also, sctp_destroy_sock() needs to be called with addr_wq_lock
  	 * held and that should be grabbed before socket lock.
  	 */
@@ -3052,7 +3535,7 @@ diff --git a/net/sctp/socket.c b/net/sctp/socket.c
  	bh_lock_sock_nested(sk);
  
  	/* Hold the sock, since sk_common_release() will put sock_put()
-@@ -1550,7 +1550,7 @@
+@@ -1551,7 +1551,7 @@
  	sk_common_release(sk);
  
  	bh_unlock_sock(sk);
@@ -3061,7 +3544,7 @@ diff --git a/net/sctp/socket.c b/net/sctp/socket.c
  
  	sock_put(sk);
  
-@@ -2279,8 +2279,8 @@
+@@ -2280,8 +2280,8 @@
  		return -EINVAL;
  
  	sp->autoclose = *optval;
@@ -3072,7 +3555,7 @@ diff --git a/net/sctp/socket.c b/net/sctp/socket.c
  
  	return 0;
  }
-@@ -3853,16 +3853,16 @@
+@@ -3854,16 +3854,16 @@
  	if ((*val && sp->do_auto_asconf) || (!*val && !sp->do_auto_asconf))
  		return 0;
  
@@ -3092,7 +3575,7 @@ diff --git a/net/sctp/socket.c b/net/sctp/socket.c
  	return 0;
  }
  
-@@ -4240,7 +4240,7 @@
+@@ -4241,7 +4241,7 @@
  	if (!asoc && p->assoc_id != SCTP_FUTURE_ASSOC && sctp_style(sk, UDP))
  		return -EINVAL;
  
@@ -3101,7 +3584,7 @@ diff --git a/net/sctp/socket.c b/net/sctp/socket.c
  		return -EPERM;
  	}
  
-@@ -4984,9 +4984,9 @@
+@@ -4985,9 +4985,9 @@
  	sp->default_timetolive = 0;
  
  	sp->default_rcv_context = 0;
@@ -3113,7 +3596,7 @@ diff --git a/net/sctp/socket.c b/net/sctp/socket.c
  
  	/* Initialize default setup parameters. These parameters
  	 * can be modified with the SCTP_INITMSG socket option or
-@@ -4994,24 +4994,24 @@
+@@ -4995,24 +4995,24 @@
  	 */
  	sp->initmsg.sinit_num_ostreams   = sctp_max_outstreams;
  	sp->initmsg.sinit_max_instreams  = sctp_max_instreams;
@@ -3145,7 +3628,7 @@ diff --git a/net/sctp/socket.c b/net/sctp/socket.c
  
  	/* Initialize default event subscriptions. By default, all the
  	 * options are off.
-@@ -5021,15 +5021,15 @@
+@@ -5022,15 +5022,15 @@
  	/* Default Peer Address Parameters.  These defaults can
  	 * be modified via SCTP_PEER_ADDR_PARAMS
  	 */
@@ -3169,7 +3652,7 @@ diff --git a/net/sctp/socket.c b/net/sctp/socket.c
  	sp->sackfreq	= 2;
  	sp->param_flags = SPP_HB_ENABLE |
  			  SPP_PMTUD_ENABLE |
-@@ -5068,7 +5068,7 @@
+@@ -5069,7 +5069,7 @@
  	atomic_set(&sp->pd_mode, 0);
  	skb_queue_head_init(&sp->pd_lobby);
  	sp->frag_interleave = 0;
@@ -3178,7 +3661,7 @@ diff --git a/net/sctp/socket.c b/net/sctp/socket.c
  
  	/* Create a per socket endpoint structure.  Even if we
  	 * change the data structure relationships, this may still
-@@ -5091,7 +5091,7 @@
+@@ -5092,7 +5092,7 @@
  }
  
  /* Cleanup any SCTP per socket resources. Must be called with
@@ -3187,7 +3670,7 @@ diff --git a/net/sctp/socket.c b/net/sctp/socket.c
   */
  static void sctp_destroy_sock(struct sock *sk)
  {
-@@ -6203,7 +6203,7 @@
+@@ -6204,7 +6204,7 @@
  	struct net *net = sock_net(sk);
  
  	rcu_read_lock();
@@ -3196,7 +3679,7 @@ diff --git a/net/sctp/socket.c b/net/sctp/socket.c
  		if (!addr->valid)
  			continue;
  
-@@ -9575,7 +9575,7 @@
+@@ -9582,7 +9582,7 @@
  		return err;
  
  	/* New ep's auth_hmacs should be set if old ep's is set, in case
@@ -3781,7 +4264,7 @@ diff --git a/net/sctp/transport.c b/net/sctp/transport.c
  
  	INIT_LIST_HEAD(&peer->transmitted);
  	INIT_LIST_HEAD(&peer->send_ready);
-@@ -504,10 +504,10 @@
+@@ -506,10 +506,10 @@
  		 * For example, assuming the default value of RTO.Alpha of
  		 * 1/8, rto_alpha would be expressed as 3.
  		 */
@@ -3796,359 +4279,3 @@ diff --git a/net/sctp/transport.c b/net/sctp/transport.c
  	} else {
  		/* 6.3.1 C2) When the first RTT measurement R is made, set
  		 * SRTT <- R, RTTVAR <- R/2.
-diff --git a/block/blk-cgroup.c b/block/blk-cgroup.c
---- a/block/blk-cgroup.c
-+++ b/block/blk-cgroup.c
-@@ -173,7 +173,8 @@
- 	int cpu;
- 
- #ifdef CONFIG_BLK_CGROUP_PUNT_BIO
--	WARN_ON(!bio_list_empty(&blkg->async_bios));
-+	struct bio_list async_bios = blkcg_gq_async_bios(blkg);
-+	WARN_ON(!bio_list_empty(&async_bios));
- #endif
- 	/*
- 	 * Flush all the non-empty percpu lockless lists before releasing
-@@ -218,7 +219,9 @@
- 
- 	/* as long as there are pending bios, @blkg can't go away */
- 	spin_lock(&blkg->async_bio_lock);
--	bio_list_merge_init(&bios, &blkg->async_bios);
-+	struct bio_list bios1 = blkcg_gq_async_bios(blkg);
-+	bio_list_merge_init(&bios, &bios1);
-+	blkcg_gq_async_bios_set(blkg, bios1);
- 	spin_unlock(&blkg->async_bio_lock);
- 
- 	/* start plug only when bio_list contains at least 2 bios */
-@@ -244,7 +247,9 @@
- 
- 	if (blkg->parent) {
- 		spin_lock(&blkg->async_bio_lock);
--		bio_list_add(&blkg->async_bios, bio);
-+		struct bio_list bios = blkcg_gq_async_bios(blkg);
-+		bio_list_add(&bios, bio);
-+		blkcg_gq_async_bios_set(blkg, bios);
- 		spin_unlock(&blkg->async_bio_lock);
- 		queue_work(blkcg_punt_bio_wq, &blkg->async_bio_work);
- 	} else {
-@@ -325,7 +330,9 @@
- 	blkg->iostat.blkg = blkg;
- #ifdef CONFIG_BLK_CGROUP_PUNT_BIO
- 	spin_lock_init(&blkg->async_bio_lock);
--	bio_list_init(&blkg->async_bios);
-+	struct bio_list async_bios = blkcg_gq_async_bios(blkg);
-+	bio_list_init(&async_bios);
-+	blkcg_gq_async_bios_set(blkg, async_bios);
- 	INIT_WORK(&blkg->async_bio_work, blkg_async_bio_workfn);
- #endif
- 
-diff --git a/block/blk-cgroup.h b/block/blk-cgroup.h
---- a/block/blk-cgroup.h
-+++ b/block/blk-cgroup.h
-@@ -69,30 +69,52 @@
- 
- 	/* is this blkg online? protected by both blkcg and q locks */
- 	bool				online;
--
-+#ifdef CONFIG_BLK_CGROUP_PUNT_BIO
-+	spinlock_t			async_bio_lock;//4
-+#endif
- 	struct blkg_iostat_set __percpu	*iostat_cpu;
- 	struct blkg_iostat_set		iostat;
- 
- 	struct blkg_policy_data		*pd[BLKCG_MAX_POLS];
--#ifdef CONFIG_BLK_CGROUP_PUNT_BIO
--	spinlock_t			async_bio_lock;
--	struct bio_list			async_bios;
--#endif
- 	union {
- 		struct work_struct	async_bio_work;
- 		struct work_struct	free_work;
- 	};
- 
- 	atomic_t			use_delay;
-+#ifdef CONFIG_BLK_CGROUP_PUNT_BIO
-+	u32			async_bios_head_high;
-+#endif
- 	atomic64_t			delay_nsec;
- 	atomic64_t			delay_start;
- 	u64				last_delay;
- 	int				last_use;
-+#ifdef CONFIG_BLK_CGROUP_PUNT_BIO
-+	u32			async_bios_head_low;
-+#endif
- 
- 	struct rcu_head			rcu_head;
- 
--	ANDROID_OEM_DATA(1);
-+#ifdef CONFIG_BLK_CGROUP_PUNT_BIO
-+	struct 	bio* async_bios_tail;//16
-+#endif
- };
-+#ifdef CONFIG_BLK_CGROUP_PUNT_BIO
-+static inline struct bio_list blkcg_gq_async_bios(struct blkcg_gq *blkg)
-+{
-+	struct bio_list bios = {
-+		.head = (struct bio *)((u64)(blkg->async_bios_head_high)<<32 | blkg->async_bios_head_low),
-+		.tail = blkg->async_bios_tail,
-+	};
-+	return bios;
-+}
-+static inline void blkcg_gq_async_bios_set(struct blkcg_gq *blkg, struct bio_list bios)
-+{
-+	blkg->async_bios_tail = bios.tail;
-+	blkg->async_bios_head_low = (u32)(uintptr_t)bios.head;
-+	blkg->async_bios_head_high = (u32)((uintptr_t)bios.head >> 32);
-+}
-+#endif
- 
- struct blkcg {
- 	struct cgroup_subsys_state	css;
-diff --git a/include/linux/blkdev.h b/include/linux/blkdev.h
---- a/include/linux/blkdev.h
-+++ b/include/linux/blkdev.h
-@@ -581,10 +581,6 @@
- 
- 	int			mq_freeze_depth;
- 
--#ifdef CONFIG_BLK_DEV_THROTTLING
--	/* Throttle data */
--	struct throtl_data *td;
--#endif
- 	struct rcu_head		rcu_head;
- #ifdef CONFIG_LOCKDEP
- 	struct task_struct	*mq_freeze_owner;
-@@ -618,7 +614,17 @@
- 
- 	ANDROID_KABI_RESERVE(1);
- 	ANDROID_KABI_RESERVE(2);
--	ANDROID_KABI_RESERVE(3);
-+	union {
-+		struct {
-+			ANDROID_KABI_RESERVE(3);
-+		};
-+		struct {
-+#ifdef CONFIG_BLK_DEV_THROTTLING
-+			/* Throttle data */
-+			struct throtl_data *td;
-+#endif
-+		};
-+	};
- 	ANDROID_KABI_RESERVE(4);
- 	ANDROID_OEM_DATA(1);
- };
-diff --git a/include/linux/ipc_namespace.h b/include/linux/ipc_namespace.h
---- a/include/linux/ipc_namespace.h
-+++ b/include/linux/ipc_namespace.h
-@@ -22,11 +22,11 @@
- 	struct idr ipcs_idr;
- 	int max_idx;
- 	int last_idx;	/* For wrap around detection */
--#ifdef CONFIG_CHECKPOINT_RESTORE
--	int next_id;
--#endif
- 	struct rhashtable key_ht;
- };
-+#ifdef CONFIG_CHECKPOINT_RESTORE
-+#define ipc_next_id(IPC_IDS) ((IPC_IDS)->key_ht.hole)//隔山打牛 借我个对齐空洞
-+#endif
- 
- struct ipc_namespace {
- 	struct ipc_ids	ids[3];
-diff --git a/include/linux/rhashtable-types.h b/include/linux/rhashtable-types.h
---- a/include/linux/rhashtable-types.h
-+++ b/include/linux/rhashtable-types.h
-@@ -85,6 +85,7 @@
- 	unsigned int			max_elems;
- 	struct rhashtable_params	p;
- 	bool				rhlist;
-+	int hole;//对齐空洞
- 	struct work_struct		run_work;
- 	struct mutex                    mutex;
- 	spinlock_t			lock;
-diff --git a/ipc/ipc_sysctl.c b/ipc/ipc_sysctl.c
---- a/ipc/ipc_sysctl.c
-+++ b/ipc/ipc_sysctl.c
-@@ -152,8 +152,8 @@
- #ifdef CONFIG_CHECKPOINT_RESTORE
- 	{
- 		.procname	= "sem_next_id",
--		.data		= &init_ipc_ns.ids[IPC_SEM_IDS].next_id,
--		.maxlen		= sizeof(init_ipc_ns.ids[IPC_SEM_IDS].next_id),
-+		.data		= &init_ipc_ns.ids[IPC_SEM_IDS].key_ht.hole,
-+		.maxlen		= sizeof(init_ipc_ns.ids[IPC_SEM_IDS].key_ht.hole),
- 		.mode		= 0444,
- 		.proc_handler	= proc_dointvec_minmax,
- 		.extra1		= SYSCTL_ZERO,
-@@ -161,8 +161,8 @@
- 	},
- 	{
- 		.procname	= "msg_next_id",
--		.data		= &init_ipc_ns.ids[IPC_MSG_IDS].next_id,
--		.maxlen		= sizeof(init_ipc_ns.ids[IPC_MSG_IDS].next_id),
-+		.data		= &init_ipc_ns.ids[IPC_MSG_IDS].key_ht.hole,
-+		.maxlen		= sizeof(init_ipc_ns.ids[IPC_MSG_IDS].key_ht.hole),
- 		.mode		= 0444,
- 		.proc_handler	= proc_dointvec_minmax,
- 		.extra1		= SYSCTL_ZERO,
-@@ -170,8 +170,8 @@
- 	},
- 	{
- 		.procname	= "shm_next_id",
--		.data		= &init_ipc_ns.ids[IPC_SHM_IDS].next_id,
--		.maxlen		= sizeof(init_ipc_ns.ids[IPC_SHM_IDS].next_id),
-+		.data		= &init_ipc_ns.ids[IPC_SHM_IDS].key_ht.hole,
-+		.maxlen		= sizeof(init_ipc_ns.ids[IPC_SHM_IDS].key_ht.hole),
- 		.mode		= 0444,
- 		.proc_handler	= proc_dointvec_minmax,
- 		.extra1		= SYSCTL_ZERO,
-@@ -211,9 +211,9 @@
- 	struct ipc_namespace *ns =
- 		container_of(head->set, struct ipc_namespace, ipc_set);
- 
--	if (((table->data == &ns->ids[IPC_SEM_IDS].next_id) ||
--	     (table->data == &ns->ids[IPC_MSG_IDS].next_id) ||
--	     (table->data == &ns->ids[IPC_SHM_IDS].next_id)) &&
-+	if (((table->data == &ns->ids[IPC_SEM_IDS].key_ht.hole) ||
-+	     (table->data == &ns->ids[IPC_MSG_IDS].key_ht.hole) ||
-+	     (table->data == &ns->ids[IPC_SHM_IDS].key_ht.hole)) &&
- 	    checkpoint_restore_ns_capable(ns->user_ns))
- 		mode = 0666;
- 	else
-@@ -277,14 +277,14 @@
- 			else if (tbl[i].data == &init_ipc_ns.sem_ctls)
- 				tbl[i].data = &ns->sem_ctls;
- #ifdef CONFIG_CHECKPOINT_RESTORE
--			else if (tbl[i].data == &init_ipc_ns.ids[IPC_SEM_IDS].next_id)
--				tbl[i].data = &ns->ids[IPC_SEM_IDS].next_id;
-+			else if (tbl[i].data == &init_ipc_ns.ids[IPC_SEM_IDS].key_ht.hole)
-+				tbl[i].data = &ns->ids[IPC_SEM_IDS].key_ht.hole;
- 
--			else if (tbl[i].data == &init_ipc_ns.ids[IPC_MSG_IDS].next_id)
--				tbl[i].data = &ns->ids[IPC_MSG_IDS].next_id;
-+			else if (tbl[i].data == &init_ipc_ns.ids[IPC_MSG_IDS].key_ht.hole)
-+				tbl[i].data = &ns->ids[IPC_MSG_IDS].key_ht.hole;
- 
--			else if (tbl[i].data == &init_ipc_ns.ids[IPC_SHM_IDS].next_id)
--				tbl[i].data = &ns->ids[IPC_SHM_IDS].next_id;
-+			else if (tbl[i].data == &init_ipc_ns.ids[IPC_SHM_IDS].key_ht.hole)
-+				tbl[i].data = &ns->ids[IPC_SHM_IDS].key_ht.hole;
- #endif
- 			else
- 				tbl[i].data = NULL;
-diff --git a/ipc/util.c b/ipc/util.c
---- a/ipc/util.c
-+++ b/ipc/util.c
-@@ -122,7 +122,7 @@
- 	ids->max_idx = -1;
- 	ids->last_idx = -1;
- #ifdef CONFIG_CHECKPOINT_RESTORE
--	ids->next_id = -1;
-+	ipc_next_id(ids) = -1;
- #endif
- }
- 
-@@ -204,8 +204,8 @@
- 	int idx, next_id = -1;
- 
- #ifdef CONFIG_CHECKPOINT_RESTORE
--	next_id = ids->next_id;
--	ids->next_id = -1;
-+	next_id = ipc_next_id(ids);
-+	ipc_next_id(ids) = -1;
- #endif
- 
- 	/*
-diff --git a/include/linux/netfilter/x_tables.h b/include/linux/netfilter/x_tables.h
---- a/include/linux/netfilter/x_tables.h
-+++ b/include/linux/netfilter/x_tables.h
-@@ -158,24 +158,23 @@
- 
- 	/* Called when entry of this type deleted. */
- 	void (*destroy)(const struct xt_mtdtor_param *);
--#ifdef CONFIG_NETFILTER_XTABLES_COMPAT
--	/* Called when userspace align differs from kernel space one */
--	void (*compat_from_user)(void *dst, const void *src);
--	int (*compat_to_user)(void __user *dst, const void *src);
--#endif
- 	/* Set this to THIS_MODULE if you are a module, otherwise NULL */
- 	struct module *me;
- 
- 	const char *table;
- 	unsigned int matchsize;
- 	unsigned int usersize;
--#ifdef CONFIG_NETFILTER_XTABLES_COMPAT
--	unsigned int compatsize;
--#endif
- 	unsigned int hooks;
- 	unsigned short proto;
--
- 	unsigned short family;
-+#ifdef CONFIG_NETFILTER_XTABLES_COMPAT
-+	unsigned int compatsize;
-+#endif
-+#ifdef CONFIG_NETFILTER_XTABLES_COMPAT
-+	/* Called when userspace align differs from kernel space one */
-+	void (*compat_from_user)(void *dst, const void *src);
-+	int (*compat_to_user)(void __user *dst, const void *src);
-+#endif
- };
- 
- /* Registration hooks for targets. */
-@@ -199,24 +198,24 @@
- 
- 	/* Called when entry of this type deleted. */
- 	void (*destroy)(const struct xt_tgdtor_param *);
--#ifdef CONFIG_NETFILTER_XTABLES_COMPAT
--	/* Called when userspace align differs from kernel space one */
--	void (*compat_from_user)(void *dst, const void *src);
--	int (*compat_to_user)(void __user *dst, const void *src);
--#endif
- 	/* Set this to THIS_MODULE if you are a module, otherwise NULL */
- 	struct module *me;
- 
- 	const char *table;
- 	unsigned int targetsize;
- 	unsigned int usersize;
--#ifdef CONFIG_NETFILTER_XTABLES_COMPAT
--	unsigned int compatsize;
--#endif
- 	unsigned int hooks;
- 	unsigned short proto;
- 
- 	unsigned short family;
-+#ifdef CONFIG_NETFILTER_XTABLES_COMPAT
-+	unsigned int compatsize;
-+#endif
-+#ifdef CONFIG_NETFILTER_XTABLES_COMPAT
-+	/* Called when userspace align differs from kernel space one */
-+	void (*compat_from_user)(void *dst, const void *src);
-+	int (*compat_to_user)(void __user *dst, const void *src);
-+#endif
- };
- 
- /* Furniture shopping... */
-diff --git a/lib/idr.c b/lib/idr.c
---- a/lib/idr.c
-+++ b/lib/idr.c
-@@ -522,6 +522,7 @@
- 	return;
-  err:
- 	xas_unlock_irqrestore(&xas, flags);
-+	if (id>500000) return;
- 	WARN(1, "ida_free called for id=%d which is not allocated.\n", id);
- }
- EXPORT_SYMBOL(ida_free);
-diff --git a/mm/mmap.c b/mm/mmap.c
---- a/mm/mmap.c
-+++ b/mm/mmap.c
-@@ -982,7 +982,7 @@
- {
- 	unsigned long index = addr;
- 
--	mmap_assert_locked(mm);
-+	//mmap_assert_locked(mm);
- 	return mt_find(&mm->mm_mt, &index, ULONG_MAX);
- }
- EXPORT_SYMBOL(find_vma);
-
