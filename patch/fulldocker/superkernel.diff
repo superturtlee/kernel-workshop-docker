@@ -414,7 +414,7 @@ diff --git a/include/linux/cgroup_subsys.h b/include/linux/cgroup_subsys.h
 +#if IS_ENABLED(CONFIG_CGROUP_HUGETLB)
 +SUBSYS(hugetlb)
 +#endif
-\ No newline at end of file
+\ 文件末尾没有换行符
 diff --git a/include/linux/ipc_namespace.h b/include/linux/ipc_namespace.h
 --- a/include/linux/ipc_namespace.h
 +++ b/include/linux/ipc_namespace.h
@@ -1220,7 +1220,7 @@ diff --git a/include/net/netns/netfilter.h b/include/net/netns/netfilter.h
 -#endif
 +
 +#endif
-\ No newline at end of file
+\ 文件末尾没有换行符
 diff --git a/include/net/sctp/sctp.h b/include/net/sctp/sctp.h
 --- a/include/net/sctp/sctp.h
 +++ b/include/net/sctp/sctp.h
