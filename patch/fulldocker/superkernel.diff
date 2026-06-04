@@ -4470,15 +4470,10 @@ index c26c993e57b1..1c9c28a2f67c 100644
  static int prepare_coming_module(struct module *mod)
  {
  	int err;
-@@ -3251,6 +3502,9 @@ static int prepare_coming_module(struct module *mod)
- 	if (err)
- 		klp_module_going(mod);
- 
-+	hook_sched_assist_module(mod);
-+	hook_midas_module(mod);
-+
- 	return err;
- }
+diff --git a/kernel/module/main.c b/kernel/module/main.c
+index ea1b4e1163898..6c4e0b4d3b502 100644
+--- a/kernel/module/main.c
++++ b/kernel/module/main.c
 @@ -2913,6 +2913,13 @@ static int load_module(struct load_info *info, const char __user *uargs,
         if (err)
                 goto free_copy;
@@ -4493,4 +4488,3 @@ index c26c993e57b1..1c9c28a2f67c 100644
         /* Figure out module layout, and allocate all the memory. */
         mod = layout_and_allocate(info, flags);
         if (IS_ERR(mod)) {
- 
