@@ -282,8 +282,6 @@ CONFIG_CEPH_LIB_USE_DNS_RESOLVER=y        # Ceph 使用 DNS 解析监视器地�
 
 ### 块设备与 I/O
 CONFIG_BLK_DEV_THROTTLING=y               # 块设备 I/O 节流
-CONFIG_ZRAM_BACKEND_ZSTD=y                # zram 压缩后端 Zstd
-CONFIG_ZRAM_BACKEND_DEFLATE=y             # zram 压缩后端 Deflate
 CONFIG_BLK_CGROUP_IOLATENCY=y             # blk-cgroup IO 延迟控制
 
 ### 传输协议扩展
