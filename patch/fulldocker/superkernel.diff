@@ -865,10 +865,10 @@ index 28d59ae94ca3..dccf98be475d 100644
   * dropped on NETDEV_UNREGISTER events.
   *
 diff --git a/include/net/net_namespace.h b/include/net/net_namespace.h
-index 022ee2fc627c..1687f24aa357 100644
+index 022ee2fc627c..eabd491d0f7b 100644
 --- a/include/net/net_namespace.h
 +++ b/include/net/net_namespace.h
-@@ -57,7 +57,24 @@ struct bpf_prog;
+@@ -57,7 +57,33 @@ struct bpf_prog;
  
  #define NETDEV_HASHBITS    8
  #define NETDEV_HASHENTRIES (1 << NETDEV_HASHBITS)
@@ -890,11 +890,20 @@ index 022ee2fc627c..1687f24aa357 100644
 +#if IS_ENABLED(CONFIG_MCTP)
 +	struct netns_mctp	mctp;
 +#endif
++#if IS_ENABLED(CONFIG_NF_FLOW_TABLE)
++	struct netns_ft ft;
++#endif
++#if IS_ENABLED(CONFIG_NF_FLOW_TABLE)
++	unsigned int offload_timeout_tcp;
++#endif
++#if IS_ENABLED(CONFIG_NF_FLOW_TABLE)
++	unsigned int offload_timeout_udp;
++#endif
 +};
  struct net {
  	/* First cache line can be often dirtied.
  	 * Do not place here read-mostly fields.
-@@ -137,17 +154,11 @@ struct net {
+@@ -137,20 +163,11 @@ struct net {
  #if IS_ENABLED(CONFIG_IEEE802154_6LOWPAN)
  	struct netns_ieee802154_lowpan	ieee802154_lowpan;
  #endif
@@ -909,10 +918,13 @@ index 022ee2fc627c..1687f24aa357 100644
 -#if defined(CONFIG_NF_TABLES) || defined(CONFIG_NF_TABLES_MODULE)
 -	struct netns_nftables	nft;
 -#endif
- #if IS_ENABLED(CONFIG_NF_FLOW_TABLE)
- 	struct netns_ft ft;
+-#if IS_ENABLED(CONFIG_NF_FLOW_TABLE)
+-	struct netns_ft ft;
+-#endif
  #endif
-@@ -166,22 +177,12 @@ struct net {
+ #ifdef CONFIG_WEXT_CORE
+ 	struct sk_buff_head	wext_nlevents;
+@@ -166,22 +183,12 @@ struct net {
  #endif
  
  	u64			net_cookie; /* written once */
@@ -935,7 +947,7 @@ index 022ee2fc627c..1687f24aa357 100644
  #if IS_ENABLED(CONFIG_CRYPTO_USER)
  	struct sock		*crypto_nlsk;
  #endif
-@@ -189,8 +190,38 @@ struct net {
+@@ -189,8 +196,38 @@ struct net {
  #if IS_ENABLED(CONFIG_SMC)
  	struct netns_smc	smc;
  #endif
@@ -1076,10 +1088,30 @@ index ee550229d4ff..1707fcb01a56 100644
  
  #define NFT_GENMASK_ANY		((1 << 0) | (1 << 1))
 diff --git a/include/net/netns/conntrack.h b/include/net/netns/conntrack.h
-index bae914815aa3..4f54cdd6ce7d 100644
+index bae914815aa3..641cb0e6070a 100644
 --- a/include/net/netns/conntrack.h
 +++ b/include/net/netns/conntrack.h
-@@ -88,6 +88,9 @@ struct nf_ip_net {
+@@ -28,9 +28,6 @@ struct nf_tcp_net {
+ 	u8 tcp_be_liberal;
+ 	u8 tcp_max_retrans;
+ 	u8 tcp_ignore_invalid_rst;
+-#if IS_ENABLED(CONFIG_NF_FLOW_TABLE)
+-	unsigned int offload_timeout;
+-#endif
+ };
+ 
+ enum udp_conntrack {
+@@ -41,9 +38,6 @@ enum udp_conntrack {
+ 
+ struct nf_udp_net {
+ 	unsigned int timeouts[UDP_CT_MAX];
+-#if IS_ENABLED(CONFIG_NF_FLOW_TABLE)
+-	unsigned int offload_timeout;
+-#endif
+ };
+ 
+ struct nf_icmp_net {
+@@ -88,6 +82,9 @@ struct nf_ip_net {
  #ifdef CONFIG_NF_CT_PROTO_SCTP
  	struct nf_sctp_net	sctp;
  #endif
@@ -1089,7 +1121,7 @@ index bae914815aa3..4f54cdd6ce7d 100644
  #ifdef CONFIG_NF_CT_PROTO_GRE
  	struct nf_gre_net	gre;
  #endif
-@@ -106,8 +109,5 @@ struct netns_ct {
+@@ -106,8 +103,5 @@ struct netns_ct {
  	struct ip_conntrack_stat __percpu *stat;
  	struct nf_ct_event_notifier __rcu *nf_conntrack_event_cb;
  	struct nf_ip_net	nf_ct_proto;
@@ -3445,6 +3477,90 @@ index 6c46aad23313..6ca0b646dea7 100644
  
  	WARN_ON_ONCE(v < 0);
  }
+diff --git a/net/netfilter/nf_conntrack_proto_tcp.c b/net/netfilter/nf_conntrack_proto_tcp.c
+index 0c1d086e96cb..a8222c908c10 100644
+--- a/net/netfilter/nf_conntrack_proto_tcp.c
++++ b/net/netfilter/nf_conntrack_proto_tcp.c
+@@ -1612,7 +1612,7 @@ void nf_conntrack_tcp_init_net(struct net *net)
+ 	tn->tcp_max_retrans = 3;
+ 
+ #if IS_ENABLED(CONFIG_NF_FLOW_TABLE)
+-	tn->offload_timeout = 30 * HZ;
++	net->ext->offload_timeout_tcp = 30 * HZ;
+ #endif
+ }
+ 
+diff --git a/net/netfilter/nf_conntrack_proto_udp.c b/net/netfilter/nf_conntrack_proto_udp.c
+index 0030fbe8885c..880179743330 100644
+--- a/net/netfilter/nf_conntrack_proto_udp.c
++++ b/net/netfilter/nf_conntrack_proto_udp.c
+@@ -275,7 +275,7 @@ void nf_conntrack_udp_init_net(struct net *net)
+ 		un->timeouts[i] = udp_timeouts[i];
+ 
+ #if IS_ENABLED(CONFIG_NF_FLOW_TABLE)
+-	un->offload_timeout = 30 * HZ;
++	net->ext->offload_timeout_udp = 30 * HZ;
+ #endif
+ }
+ 
+diff --git a/net/netfilter/nf_conntrack_standalone.c b/net/netfilter/nf_conntrack_standalone.c
+index 3ea60ff7a6a4..34affe12024c 100644
+--- a/net/netfilter/nf_conntrack_standalone.c
++++ b/net/netfilter/nf_conntrack_standalone.c
+@@ -988,7 +988,7 @@ static void nf_conntrack_standalone_init_tcp_sysctl(struct net *net,
+ #undef XASSIGN
+ 
+ #if IS_ENABLED(CONFIG_NF_FLOW_TABLE)
+-	table[NF_SYSCTL_CT_PROTO_TIMEOUT_TCP_OFFLOAD].data = &tn->offload_timeout;
++	table[NF_SYSCTL_CT_PROTO_TIMEOUT_TCP_OFFLOAD].data = &(net->ext->offload_timeout_tcp);
+ #endif
+ 
+ }
+@@ -1078,7 +1078,7 @@ static int nf_conntrack_standalone_init_sysctl(struct net *net)
+ 	table[NF_SYSCTL_CT_PROTO_TIMEOUT_UDP].data = &un->timeouts[UDP_CT_UNREPLIED];
+ 	table[NF_SYSCTL_CT_PROTO_TIMEOUT_UDP_STREAM].data = &un->timeouts[UDP_CT_REPLIED];
+ #if IS_ENABLED(CONFIG_NF_FLOW_TABLE)
+-	table[NF_SYSCTL_CT_PROTO_TIMEOUT_UDP_OFFLOAD].data = &un->offload_timeout;
++	table[NF_SYSCTL_CT_PROTO_TIMEOUT_UDP_OFFLOAD].data = &(net->ext->offload_timeout_udp);
+ #endif
+ 
+ 	nf_conntrack_standalone_init_tcp_sysctl(net, table);
+diff --git a/net/netfilter/nf_flow_table_core.c b/net/netfilter/nf_flow_table_core.c
+index df72b0376970..f4bb0ee05169 100644
+--- a/net/netfilter/nf_flow_table_core.c
++++ b/net/netfilter/nf_flow_table_core.c
+@@ -179,7 +179,7 @@ static void flow_offload_fixup_ct(struct nf_conn *ct)
+ 		flow_offload_fixup_tcp(&ct->proto.tcp);
+ 
+ 		timeout = tn->timeouts[ct->proto.tcp.state];
+-		timeout -= tn->offload_timeout;
++		timeout -= net->ext->offload_timeout_tcp;
+ 	} else if (l4num == IPPROTO_UDP) {
+ 		struct nf_udp_net *tn = nf_udp_pernet(net);
+ 		enum udp_conntrack state =
+@@ -187,7 +187,7 @@ static void flow_offload_fixup_ct(struct nf_conn *ct)
+ 			UDP_CT_REPLIED : UDP_CT_UNREPLIED;
+ 
+ 		timeout = tn->timeouts[state];
+-		timeout -= tn->offload_timeout;
++		timeout -= net->ext->offload_timeout_udp;
+ 	} else {
+ 		return;
+ 	}
+@@ -262,11 +262,11 @@ unsigned long flow_offload_get_timeout(struct flow_offload *flow)
+ 	if (l4num == IPPROTO_TCP) {
+ 		struct nf_tcp_net *tn = nf_tcp_pernet(net);
+ 
+-		timeout = tn->offload_timeout;
++		timeout = net->ext->offload_timeout_tcp;
+ 	} else if (l4num == IPPROTO_UDP) {
+ 		struct nf_udp_net *tn = nf_udp_pernet(net);
+ 
+-		timeout = tn->offload_timeout;
++		timeout = net->ext->offload_timeout_udp;
+ 	}
+ 
+ 	return timeout;
 diff --git a/net/netfilter/nf_hooks_lwtunnel.c b/net/netfilter/nf_hooks_lwtunnel.c
 index 2d890dd04ff8..4758f842daf7 100644
 --- a/net/netfilter/nf_hooks_lwtunnel.c
