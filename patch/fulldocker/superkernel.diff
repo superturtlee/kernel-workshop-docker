@@ -3567,14 +3567,14 @@ index df72b0376970..f8658f379d9b 100644
  {
 -	net->ft.stat = alloc_percpu(struct nf_flow_table_stat);
 -	return net->ft.stat ? 0 : -ENOMEM;
-+	net->ext.ft.stat = alloc_percpu(struct nf_flow_table_stat);
-+	return net->ext.ft.stat ? 0 : -ENOMEM;
++	net->ext->ft.stat = alloc_percpu(struct nf_flow_table_stat);
++	return net->ext->ft.stat ? 0 : -ENOMEM;
  }
  
  static void nf_flow_table_fini_net(struct net *net)
  {
 -	free_percpu(net->ft.stat);
-+	free_percpu(net->ext.ft.stat);
++	free_percpu(net->ext->ft.stat);
  }
  
  static int nf_flow_table_pernet_init(struct net *net)
@@ -3587,7 +3587,7 @@ index 159b033a43e6..eb6c2427959f 100644
  			continue;
  		*pos = cpu + 1;
 -		return per_cpu_ptr(net->ft.stat, cpu);
-+		return per_cpu_ptr(net->ext.ft.stat, cpu);
++		return per_cpu_ptr(net->ext->ft.stat, cpu);
  	}
  
  	return NULL;
@@ -3596,7 +3596,7 @@ index 159b033a43e6..eb6c2427959f 100644
  			continue;
  		*pos = cpu + 1;
 -		return per_cpu_ptr(net->ft.stat, cpu);
-+		return per_cpu_ptr(net->ext.ft.stat, cpu);
++		return per_cpu_ptr(net->ext->ft.stat, cpu);
  	}
  	(*pos)++;
  	return NULL;
