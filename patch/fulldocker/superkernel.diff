@@ -1065,6 +1065,27 @@ index 6903f72bcc15..b9f03205a29c 100644
  		return NULL;
  
  	return nf_ct_ext_add(ct, NF_CT_EXT_LABELS, GFP_ATOMIC);
+diff --git a/include/net/netfilter/nf_flow_table.h b/include/net/netfilter/nf_flow_table.h
+index 1a6fca013165..eb63430dc73e 100644
+--- a/include/net/netfilter/nf_flow_table.h
++++ b/include/net/netfilter/nf_flow_table.h
+@@ -377,12 +377,12 @@ static inline bool nf_flow_pppoe_proto(struct sk_buff *skb, __be16 *inner_proto)
+ 	return true;
+ }
+ 
+-#define NF_FLOW_TABLE_STAT_INC(net, count) __this_cpu_inc((net)->ft.stat->count)
+-#define NF_FLOW_TABLE_STAT_DEC(net, count) __this_cpu_dec((net)->ft.stat->count)
++#define NF_FLOW_TABLE_STAT_INC(net, count) __this_cpu_inc((net)->ext->ft.stat->count)
++#define NF_FLOW_TABLE_STAT_DEC(net, count) __this_cpu_dec((net)->ext->ft.stat->count)
+ #define NF_FLOW_TABLE_STAT_INC_ATOMIC(net, count)	\
+-	this_cpu_inc((net)->ft.stat->count)
++	this_cpu_inc((net)->ext->ft.stat->count)
+ #define NF_FLOW_TABLE_STAT_DEC_ATOMIC(net, count)	\
+-	this_cpu_dec((net)->ft.stat->count)
++	this_cpu_dec((net)->ext->ft.stat->count)
+ 
+ #ifdef CONFIG_NF_FLOW_TABLE_PROCFS
+ int nf_flow_table_init_proc(struct net *net);
 diff --git a/include/net/netfilter/nf_tables.h b/include/net/netfilter/nf_tables.h
 index ee550229d4ff..1707fcb01a56 100644
 --- a/include/net/netfilter/nf_tables.h
@@ -3567,14 +3588,14 @@ index df72b0376970..f8658f379d9b 100644
  {
 -	net->ft.stat = alloc_percpu(struct nf_flow_table_stat);
 -	return net->ft.stat ? 0 : -ENOMEM;
-+	net->ext->ft.stat = alloc_percpu(struct nf_flow_table_stat);
-+	return net->ext->ft.stat ? 0 : -ENOMEM;
++	net->ext.ft.stat = alloc_percpu(struct nf_flow_table_stat);
++	return net->ext.ft.stat ? 0 : -ENOMEM;
  }
  
  static void nf_flow_table_fini_net(struct net *net)
  {
 -	free_percpu(net->ft.stat);
-+	free_percpu(net->ext->ft.stat);
++	free_percpu(net->ext.ft.stat);
  }
  
  static int nf_flow_table_pernet_init(struct net *net)
@@ -3587,7 +3608,7 @@ index 159b033a43e6..eb6c2427959f 100644
  			continue;
  		*pos = cpu + 1;
 -		return per_cpu_ptr(net->ft.stat, cpu);
-+		return per_cpu_ptr(net->ext->ft.stat, cpu);
++		return per_cpu_ptr(net->ext.ft.stat, cpu);
  	}
  
  	return NULL;
@@ -3596,7 +3617,7 @@ index 159b033a43e6..eb6c2427959f 100644
  			continue;
  		*pos = cpu + 1;
 -		return per_cpu_ptr(net->ft.stat, cpu);
-+		return per_cpu_ptr(net->ext->ft.stat, cpu);
++		return per_cpu_ptr(net->ext.ft.stat, cpu);
  	}
  	(*pos)++;
  	return NULL;
