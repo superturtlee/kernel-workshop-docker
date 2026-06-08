@@ -333,7 +333,7 @@ index e8240cf2611a..9bc10b685cb9 100644
  struct ipc_namespace {
  	struct ipc_ids	ids[3];
 diff --git a/include/linux/netdevice.h b/include/linux/netdevice.h
-index d34a2bf6f577..a9ba52bcd1cc 100644
+index d34a2bf6f577..96fd151d5fc0 100644
 --- a/include/linux/netdevice.h
 +++ b/include/linux/netdevice.h
 @@ -2179,9 +2179,6 @@ struct net_device {
@@ -346,22 +346,26 @@ index d34a2bf6f577..a9ba52bcd1cc 100644
  #if IS_ENABLED(CONFIG_IPV6)
  	const struct ndisc_ops *ndisc_ops;
  #endif
-@@ -2255,9 +2252,6 @@ struct net_device {
+@@ -2255,12 +2252,6 @@ struct net_device {
  #if IS_ENABLED(CONFIG_IEEE802154) || IS_ENABLED(CONFIG_6LOWPAN)
  	struct wpan_dev		*ieee802154_ptr;
  #endif
 -#if IS_ENABLED(CONFIG_MPLS_ROUTING)
 -	struct mpls_dev __rcu	*mpls_ptr;
 -#endif
- #if IS_ENABLED(CONFIG_MCTP)
- 	struct mctp_dev __rcu	*mctp_ptr;
- #endif
-@@ -2426,8 +2420,26 @@ struct net_device {
+-#if IS_ENABLED(CONFIG_MCTP)
+-	struct mctp_dev __rcu	*mctp_ptr;
+-#endif
+ 
+ /*
+  * Cache lines mostly used on receive path (including eth_type_trans())
+@@ -2426,9 +2417,36 @@ struct net_device {
  
  	ANDROID_KABI_RESERVE(1);
  	ANDROID_KABI_RESERVE(2);
 -	ANDROID_KABI_RESERVE(3);
 -	ANDROID_KABI_RESERVE(4);
+-	ANDROID_KABI_RESERVE(5);
 +	union{
 +		struct {
 +			ANDROID_KABI_RESERVE(3);
@@ -382,9 +386,19 @@ index d34a2bf6f577..a9ba52bcd1cc 100644
 +#endif
 +		};
 +	};
- 	ANDROID_KABI_RESERVE(5);
++	union{
++		struct{
++			ANDROID_KABI_RESERVE(5);
++		};
++		struct{
++#if IS_ENABLED(CONFIG_MCTP)
++			struct mctp_dev __rcu	*mctp_ptr;
++#endif
++		};
++	};
  	ANDROID_KABI_RESERVE(6);
  	ANDROID_KABI_RESERVE(7);
+ 	ANDROID_KABI_RESERVE(8);
 diff --git a/include/linux/netfilter.h b/include/linux/netfilter.h
 index 9a28dd835566..ca768dda5a0d 100644
 --- a/include/linux/netfilter.h
@@ -674,11 +688,24 @@ index ff406ef4fd4a..e909025f965a 100644
  }
  
  /* Connections' size value needed by ip_vs_ctl.c */
+diff --git a/include/net/mctp.h b/include/net/mctp.h
+index 28d59ae94ca3..dccf98be475d 100644
+--- a/include/net/mctp.h
++++ b/include/net/mctp.h
+@@ -224,7 +224,7 @@ struct mctp_flow {
+ 
+ /* Route definition.
+  *
+- * These are held in the pernet->mctp.routes list, with RCU protection for
++ * These are held in the pernet_mctp(net).routes list, with RCU protection for
+  * removed routes. We hold a reference to the netdev; routes need to be
+  * dropped on NETDEV_UNREGISTER events.
+  *
 diff --git a/include/net/net_namespace.h b/include/net/net_namespace.h
-index 022ee2fc627c..0a2e32ff7421 100644
+index 022ee2fc627c..80f2cd3b5669 100644
 --- a/include/net/net_namespace.h
 +++ b/include/net/net_namespace.h
-@@ -57,7 +57,21 @@ struct bpf_prog;
+@@ -57,7 +57,24 @@ struct bpf_prog;
  
  #define NETDEV_HASHBITS    8
  #define NETDEV_HASHENTRIES (1 << NETDEV_HASHBITS)
@@ -697,11 +724,14 @@ index 022ee2fc627c..0a2e32ff7421 100644
 +#if IS_ENABLED(CONFIG_MPLS)
 +	struct netns_mpls	mpls;
 +#endif
++#if IS_ENABLED(CONFIG_MCTP)
++	struct netns_mctp	mctp;
++#endif
 +};
  struct net {
  	/* First cache line can be often dirtied.
  	 * Do not place here read-mostly fields.
-@@ -137,17 +151,11 @@ struct net {
+@@ -137,17 +154,11 @@ struct net {
  #if IS_ENABLED(CONFIG_IEEE802154_6LOWPAN)
  	struct netns_ieee802154_lowpan	ieee802154_lowpan;
  #endif
@@ -719,7 +749,7 @@ index 022ee2fc627c..0a2e32ff7421 100644
  #if IS_ENABLED(CONFIG_NF_FLOW_TABLE)
  	struct netns_ft ft;
  #endif
-@@ -166,13 +174,6 @@ struct net {
+@@ -166,22 +177,12 @@ struct net {
  #endif
  
  	u64			net_cookie; /* written once */
@@ -733,7 +763,16 @@ index 022ee2fc627c..0a2e32ff7421 100644
  #if IS_ENABLED(CONFIG_CAN)
  	struct netns_can	can;
  #endif
-@@ -189,8 +190,34 @@ struct net {
+ #ifdef CONFIG_XDP_SOCKETS
+ 	struct netns_xdp	xdp;
+ #endif
+-#if IS_ENABLED(CONFIG_MCTP)
+-	struct netns_mctp	mctp;
+-#endif
+ #if IS_ENABLED(CONFIG_CRYPTO_USER)
+ 	struct sock		*crypto_nlsk;
+ #endif
+@@ -189,8 +190,37 @@ struct net {
  #if IS_ENABLED(CONFIG_SMC)
  	struct netns_smc	smc;
  #endif
@@ -763,6 +802,9 @@ index 022ee2fc627c..0a2e32ff7421 100644
 +#endif
 +#if IS_ENABLED(CONFIG_MPLS)
 +#define net_mpls(_net)		((_net)->ext->mpls)
++#endif
++#if IS_ENABLED(CONFIG_MCTP)
++#define net_mctp(_net)		((_net)->ext->mctp)
 +#endif
 +
  #include <linux/seq_file_net.h>
@@ -2232,6 +2274,453 @@ index ee3c1b37d06c..2c2ac00b90c0 100644
  
  #ifdef CONFIG_KEYS
  	init_net.key_domain = &init_net_key_domain;
+diff --git a/net/mctp/af_mctp.c b/net/mctp/af_mctp.c
+index 9a552569143b..f46a80c20e44 100644
+--- a/net/mctp/af_mctp.c
++++ b/net/mctp/af_mctp.c
+@@ -282,7 +282,7 @@ static int mctp_recvmsg(struct socket *sock, struct msghdr *msg, size_t len,
+ static void __mctp_key_remove(struct mctp_sk_key *key, struct net *net,
+ 			      unsigned long flags, unsigned long reason)
+ __releases(&key->lock)
+-__must_hold(&net->mctp.keys_lock)
++__must_hold(&net_mctp(net).keys_lock)
+ {
+ 	struct sk_buff *skb;
+ 
+@@ -451,11 +451,11 @@ static int mctp_ioctl_alloctag(struct mctp_sock *msk, bool tagv2,
+ 		 * flags value (fl2) to pass to __mctp_key_remove, hence the
+ 		 * second spin_lock_irqsave() rather than a plain spin_lock().
+ 		 */
+-		spin_lock_irqsave(&net->mctp.keys_lock, flags);
++		spin_lock_irqsave(&net_mctp(net).keys_lock, flags);
+ 		spin_lock_irqsave(&key->lock, fl2);
+ 		__mctp_key_remove(key, net, fl2, MCTP_TRACE_KEY_DROPPED);
+ 		mctp_key_unref(key);
+-		spin_unlock_irqrestore(&net->mctp.keys_lock, flags);
++		spin_unlock_irqrestore(&net_mctp(net).keys_lock, flags);
+ 		return rc;
+ 	}
+ 
+@@ -488,7 +488,7 @@ static int mctp_ioctl_droptag(struct mctp_sock *msk, bool tagv2,
+ 	if (ctl.peer_addr == MCTP_ADDR_NULL)
+ 		ctl.peer_addr = MCTP_ADDR_ANY;
+ 
+-	spin_lock_irqsave(&net->mctp.keys_lock, flags);
++	spin_lock_irqsave(&net_mctp(net).keys_lock, flags);
+ 	hlist_for_each_entry_safe(key, tmp, &msk->keys, sklist) {
+ 		/* we do an irqsave here, even though we know the irq state,
+ 		 * so we have the flags to pass to __mctp_key_remove
+@@ -505,7 +505,7 @@ static int mctp_ioctl_droptag(struct mctp_sock *msk, bool tagv2,
+ 			spin_unlock_irqrestore(&key->lock, fl2);
+ 		}
+ 	}
+-	spin_unlock_irqrestore(&net->mctp.keys_lock, flags);
++	spin_unlock_irqrestore(&net_mctp(net).keys_lock, flags);
+ 
+ 	return rc;
+ }
+@@ -579,7 +579,7 @@ static void mctp_sk_expire_keys(struct timer_list *timer)
+ 	struct hlist_node *tmp;
+ 	bool next_expiry_valid = false;
+ 
+-	spin_lock_irqsave(&net->mctp.keys_lock, flags);
++	spin_lock_irqsave(&net_mctp(net).keys_lock, flags);
+ 
+ 	hlist_for_each_entry_safe(key, tmp, &msk->keys, sklist) {
+ 		/* don't expire. manual_alloc is immutable, no locking
+@@ -605,7 +605,7 @@ static void mctp_sk_expire_keys(struct timer_list *timer)
+ 		spin_unlock_irqrestore(&key->lock, fl2);
+ 	}
+ 
+-	spin_unlock_irqrestore(&net->mctp.keys_lock, flags);
++	spin_unlock_irqrestore(&net_mctp(net).keys_lock, flags);
+ 
+ 	if (next_expiry_valid)
+ 		mod_timer(timer, next_expiry);
+@@ -637,10 +637,10 @@ static int mctp_sk_hash(struct sock *sk)
+ 	/* Bind lookup runs under RCU, remain live during that. */
+ 	sock_set_flag(sk, SOCK_RCU_FREE);
+ 
+-	mutex_lock(&net->mctp.bind_lock);
++	mutex_lock(&net_mctp(net).bind_lock);
+ 
+ 	/* Prevent duplicate binds. */
+-	sk_for_each(existing, &net->mctp.binds) {
++	sk_for_each(existing, &net_mctp(net).binds) {
+ 		struct mctp_sock *mex =
+ 			container_of(existing, struct mctp_sock, sk);
+ 
+@@ -652,11 +652,11 @@ static int mctp_sk_hash(struct sock *sk)
+ 		}
+ 	}
+ 
+-	sk_add_node_rcu(sk, &net->mctp.binds);
++	sk_add_node_rcu(sk, &net_mctp(net).binds);
+ 	rc = 0;
+ 
+ out:
+-	mutex_unlock(&net->mctp.bind_lock);
++	mutex_unlock(&net_mctp(net).bind_lock);
+ 	return rc;
+ }
+ 
+@@ -669,18 +669,18 @@ static void mctp_sk_unhash(struct sock *sk)
+ 	struct hlist_node *tmp;
+ 
+ 	/* remove from any type-based binds */
+-	mutex_lock(&net->mctp.bind_lock);
++	mutex_lock(&net_mctp(net).bind_lock);
+ 	sk_del_node_init_rcu(sk);
+-	mutex_unlock(&net->mctp.bind_lock);
++	mutex_unlock(&net_mctp(net).bind_lock);
+ 
+ 	/* remove tag allocations */
+-	spin_lock_irqsave(&net->mctp.keys_lock, flags);
++	spin_lock_irqsave(&net_mctp(net).keys_lock, flags);
+ 	hlist_for_each_entry_safe(key, tmp, &msk->keys, sklist) {
+ 		spin_lock_irqsave(&key->lock, fl2);
+ 		__mctp_key_remove(key, net, fl2, MCTP_TRACE_KEY_CLOSED);
+ 	}
+ 	sock_set_flag(sk, SOCK_DEAD);
+-	spin_unlock_irqrestore(&net->mctp.keys_lock, flags);
++	spin_unlock_irqrestore(&net_mctp(net).keys_lock, flags);
+ 
+ 	/* Since there are no more tag allocations (we have removed all of the
+ 	 * keys), stop any pending expiry events. the timer cannot be re-queued
+diff --git a/net/mctp/neigh.c b/net/mctp/neigh.c
+index 590f642413e4..6deaff2d02d7 100644
+--- a/net/mctp/neigh.c
++++ b/net/mctp/neigh.c
+@@ -29,7 +29,7 @@ static int mctp_neigh_add(struct mctp_dev *mdev, mctp_eid_t eid,
+ 	struct mctp_neigh *neigh;
+ 	int rc;
+ 
+-	mutex_lock(&net->mctp.neigh_lock);
++	mutex_lock(&net_mctp(net).neigh_lock);
+ 	if (mctp_neigh_lookup(mdev, eid, NULL) == 0) {
+ 		rc = -EEXIST;
+ 		goto out;
+@@ -52,10 +52,10 @@ static int mctp_neigh_add(struct mctp_dev *mdev, mctp_eid_t eid,
+ 	neigh->source = source;
+ 	memcpy(neigh->ha, lladdr, lladdr_len);
+ 
+-	list_add_rcu(&neigh->list, &net->mctp.neighbours);
++	list_add_rcu(&neigh->list, &net_mctp(net).neighbours);
+ 	rc = 0;
+ out:
+-	mutex_unlock(&net->mctp.neigh_lock);
++	mutex_unlock(&net_mctp(net).neigh_lock);
+ 	return rc;
+ }
+ 
+@@ -73,8 +73,8 @@ void mctp_neigh_remove_dev(struct mctp_dev *mdev)
+ 	struct net *net = dev_net(mdev->dev);
+ 	struct mctp_neigh *neigh, *tmp;
+ 
+-	mutex_lock(&net->mctp.neigh_lock);
+-	list_for_each_entry_safe(neigh, tmp, &net->mctp.neighbours, list) {
++	mutex_lock(&net_mctp(net).neigh_lock);
++	list_for_each_entry_safe(neigh, tmp, &net_mctp(net).neighbours, list) {
+ 		if (neigh->dev == mdev) {
+ 			list_del_rcu(&neigh->list);
+ 			/* TODO: immediate RTM_DELNEIGH */
+@@ -82,7 +82,7 @@ void mctp_neigh_remove_dev(struct mctp_dev *mdev)
+ 		}
+ 	}
+ 
+-	mutex_unlock(&net->mctp.neigh_lock);
++	mutex_unlock(&net_mctp(net).neigh_lock);
+ }
+ 
+ static int mctp_neigh_remove(struct mctp_dev *mdev, mctp_eid_t eid,
+@@ -92,8 +92,8 @@ static int mctp_neigh_remove(struct mctp_dev *mdev, mctp_eid_t eid,
+ 	struct mctp_neigh *neigh, *tmp;
+ 	bool dropped = false;
+ 
+-	mutex_lock(&net->mctp.neigh_lock);
+-	list_for_each_entry_safe(neigh, tmp, &net->mctp.neighbours, list) {
++	mutex_lock(&net_mctp(net).neigh_lock);
++	list_for_each_entry_safe(neigh, tmp, &net_mctp(net).neighbours, list) {
+ 		if (neigh->dev == mdev && neigh->eid == eid &&
+ 		    neigh->source == source) {
+ 			list_del_rcu(&neigh->list);
+@@ -103,7 +103,7 @@ static int mctp_neigh_remove(struct mctp_dev *mdev, mctp_eid_t eid,
+ 		}
+ 	}
+ 
+-	mutex_unlock(&net->mctp.neigh_lock);
++	mutex_unlock(&net_mctp(net).neigh_lock);
+ 	return dropped ? 0 : -ENOENT;
+ }
+ 
+@@ -255,7 +255,7 @@ static int mctp_rtm_getneigh(struct sk_buff *skb, struct netlink_callback *cb)
+ 
+ 	idx = 0;
+ 	rcu_read_lock();
+-	list_for_each_entry_rcu(neigh, &net->mctp.neighbours, list) {
++	list_for_each_entry_rcu(neigh, &net_mctp(net).neighbours, list) {
+ 		if (idx < cbctx->idx)
+ 			goto cont;
+ 
+@@ -283,7 +283,7 @@ int mctp_neigh_lookup(struct mctp_dev *mdev, mctp_eid_t eid, void *ret_hwaddr)
+ 	int rc = -EHOSTUNREACH; // TODO: or ENOENT?
+ 
+ 	rcu_read_lock();
+-	list_for_each_entry_rcu(neigh, &net->mctp.neighbours, list) {
++	list_for_each_entry_rcu(neigh, &net_mctp(net).neighbours, list) {
+ 		if (mdev == neigh->dev && eid == neigh->eid) {
+ 			if (ret_hwaddr)
+ 				memcpy(ret_hwaddr, neigh->ha,
+@@ -299,7 +299,7 @@ int mctp_neigh_lookup(struct mctp_dev *mdev, mctp_eid_t eid, void *ret_hwaddr)
+ /* namespace registration */
+ static int __net_init mctp_neigh_net_init(struct net *net)
+ {
+-	struct netns_mctp *ns = &net->mctp;
++	struct netns_mctp *ns = &net_mctp(net);
+ 
+ 	INIT_LIST_HEAD(&ns->neighbours);
+ 	mutex_init(&ns->neigh_lock);
+@@ -308,7 +308,7 @@ static int __net_init mctp_neigh_net_init(struct net *net)
+ 
+ static void __net_exit mctp_neigh_net_exit(struct net *net)
+ {
+-	struct netns_mctp *ns = &net->mctp;
++	struct netns_mctp *ns = &net_mctp(net);
+ 	struct mctp_neigh *neigh;
+ 
+ 	list_for_each_entry(neigh, &ns->neighbours, list)
+diff --git a/net/mctp/route.c b/net/mctp/route.c
+index 19ff259d7bc4..21d78450ef32 100644
+--- a/net/mctp/route.c
++++ b/net/mctp/route.c
+@@ -55,7 +55,7 @@ static struct mctp_sock *mctp_lookup_bind(struct net *net, struct sk_buff *skb)
+ 
+ 	type = (*(u8 *)skb->data) & 0x7f;
+ 
+-	sk_for_each_rcu(sk, &net->mctp.binds) {
++	sk_for_each_rcu(sk, &net_mctp(net).binds) {
+ 		struct mctp_sock *msk = container_of(sk, struct mctp_sock, sk);
+ 
+ 		if (msk->bind_net != MCTP_NET_ANY && msk->bind_net != cb->net)
+@@ -75,7 +75,7 @@ static struct mctp_sock *mctp_lookup_bind(struct net *net, struct sk_buff *skb)
+ 
+ /* A note on the key allocations.
+  *
+- * struct net->mctp.keys contains our set of currently-allocated keys for
++ * struct net_mctp(net).keys contains our set of currently-allocated keys for
+  * MCTP tag management. The lookup tuple for these is the peer EID,
+  * local EID and MCTP tag.
+  *
+@@ -142,9 +142,9 @@ static struct mctp_sk_key *mctp_lookup_key(struct net *net, struct sk_buff *skb,
+ 	tag = mh->flags_seq_tag & (MCTP_HDR_TAG_MASK | MCTP_HDR_FLAG_TO);
+ 
+ 	ret = NULL;
+-	spin_lock_irqsave(&net->mctp.keys_lock, flags);
++	spin_lock_irqsave(&net_mctp(net).keys_lock, flags);
+ 
+-	hlist_for_each_entry(key, &net->mctp.keys, hlist) {
++	hlist_for_each_entry(key, &net_mctp(net).keys, hlist) {
+ 		if (!mctp_key_match(key, netid, mh->dest, peer, tag))
+ 			continue;
+ 
+@@ -158,10 +158,10 @@ static struct mctp_sk_key *mctp_lookup_key(struct net *net, struct sk_buff *skb,
+ 	}
+ 
+ 	if (ret) {
+-		spin_unlock(&net->mctp.keys_lock);
++		spin_unlock(&net_mctp(net).keys_lock);
+ 		*irqflags = flags;
+ 	} else {
+-		spin_unlock_irqrestore(&net->mctp.keys_lock, flags);
++		spin_unlock_irqrestore(&net_mctp(net).keys_lock, flags);
+ 	}
+ 
+ 	return ret;
+@@ -216,14 +216,14 @@ static int mctp_key_add(struct mctp_sk_key *key, struct mctp_sock *msk)
+ 	unsigned long flags;
+ 	int rc = 0;
+ 
+-	spin_lock_irqsave(&net->mctp.keys_lock, flags);
++	spin_lock_irqsave(&net_mctp(net).keys_lock, flags);
+ 
+ 	if (sock_flag(&msk->sk, SOCK_DEAD)) {
+ 		rc = -EINVAL;
+ 		goto out_unlock;
+ 	}
+ 
+-	hlist_for_each_entry(tmp, &net->mctp.keys, hlist) {
++	hlist_for_each_entry(tmp, &net_mctp(net).keys, hlist) {
+ 		if (mctp_key_match(tmp, key->net, key->local_addr,
+ 				   key->peer_addr, key->tag)) {
+ 			spin_lock(&tmp->lock);
+@@ -240,12 +240,12 @@ static int mctp_key_add(struct mctp_sk_key *key, struct mctp_sock *msk)
+ 		key->expiry = jiffies + mctp_key_lifetime;
+ 		timer_reduce(&msk->key_expiry, key->expiry);
+ 
+-		hlist_add_head(&key->hlist, &net->mctp.keys);
++		hlist_add_head(&key->hlist, &net_mctp(net).keys);
+ 		hlist_add_head(&key->sklist, &msk->keys);
+ 	}
+ 
+ out_unlock:
+-	spin_unlock_irqrestore(&net->mctp.keys_lock, flags);
++	spin_unlock_irqrestore(&net_mctp(net).keys_lock, flags);
+ 
+ 	return rc;
+ }
+@@ -274,13 +274,13 @@ __releases(&key->lock)
+ 	spin_unlock_irqrestore(&key->lock, flags);
+ 
+ 	if (!key->manual_alloc) {
+-		spin_lock_irqsave(&net->mctp.keys_lock, flags);
++		spin_lock_irqsave(&net_mctp(net).keys_lock, flags);
+ 		if (!hlist_unhashed(&key->hlist)) {
+ 			hlist_del_init(&key->hlist);
+ 			hlist_del_init(&key->sklist);
+ 			mctp_key_unref(key);
+ 		}
+-		spin_unlock_irqrestore(&net->mctp.keys_lock, flags);
++		spin_unlock_irqrestore(&net_mctp(net).keys_lock, flags);
+ 	}
+ 
+ 	/* and one for the local reference */
+@@ -638,14 +638,14 @@ static struct mctp_route *mctp_route_alloc(void)
+ 
+ unsigned int mctp_default_net(struct net *net)
+ {
+-	return READ_ONCE(net->mctp.default_net);
++	return READ_ONCE(net_mctp(net).default_net);
+ }
+ 
+ int mctp_default_net_set(struct net *net, unsigned int index)
+ {
+ 	if (index == 0)
+ 		return -EINVAL;
+-	WRITE_ONCE(net->mctp.default_net, index);
++	WRITE_ONCE(net_mctp(net).default_net, index);
+ 	return 0;
+ }
+ 
+@@ -653,7 +653,7 @@ int mctp_default_net_set(struct net *net, unsigned int index)
+ static void mctp_reserve_tag(struct net *net, struct mctp_sk_key *key,
+ 			     struct mctp_sock *msk)
+ {
+-	struct netns_mctp *mns = &net->mctp;
++	struct netns_mctp *mns = &net_mctp(net);
+ 
+ 	lockdep_assert_held(&mns->keys_lock);
+ 
+@@ -677,7 +677,7 @@ struct mctp_sk_key *mctp_alloc_local_tag(struct mctp_sock *msk,
+ 					 bool manual, u8 *tagp)
+ {
+ 	struct net *net = sock_net(&msk->sk);
+-	struct netns_mctp *mns = &net->mctp;
++	struct netns_mctp *mns = &net_mctp(net);
+ 	struct mctp_sk_key *key, *tmp;
+ 	unsigned long flags;
+ 	u8 tagbits;
+@@ -761,7 +761,7 @@ static struct mctp_sk_key *mctp_lookup_prealloc_tag(struct mctp_sock *msk,
+ 						    u8 req_tag, u8 *tagp)
+ {
+ 	struct net *net = sock_net(&msk->sk);
+-	struct netns_mctp *mns = &net->mctp;
++	struct netns_mctp *mns = &net_mctp(net);
+ 	struct mctp_sk_key *key, *tmp;
+ 	unsigned long flags;
+ 
+@@ -828,7 +828,7 @@ struct mctp_route *mctp_route_lookup(struct net *net, unsigned int dnet,
+ 
+ 	rcu_read_lock();
+ 
+-	list_for_each_entry_rcu(tmp, &net->mctp.routes, list) {
++	list_for_each_entry_rcu(tmp, &net_mctp(net).routes, list) {
+ 		/* TODO: add metrics */
+ 		if (mctp_rt_match_eid(tmp, dnet, daddr)) {
+ 			if (refcount_inc_not_zero(&tmp->refs)) {
+@@ -850,7 +850,7 @@ static struct mctp_route *mctp_route_lookup_null(struct net *net,
+ 
+ 	rcu_read_lock();
+ 
+-	list_for_each_entry_rcu(tmp, &net->mctp.routes, list) {
++	list_for_each_entry_rcu(tmp, &net_mctp(net).routes, list) {
+ 		if (tmp->dev->dev == dev && tmp->type == RTN_LOCAL &&
+ 		    refcount_inc_not_zero(&tmp->refs)) {
+ 			rt = tmp;
+@@ -1115,14 +1115,14 @@ static int mctp_route_add(struct mctp_dev *mdev, mctp_eid_t daddr_start,
+ 
+ 	ASSERT_RTNL();
+ 	/* Prevent duplicate identical routes. */
+-	list_for_each_entry(ert, &net->mctp.routes, list) {
++	list_for_each_entry(ert, &net_mctp(net).routes, list) {
+ 		if (mctp_rt_compare_exact(rt, ert)) {
+ 			mctp_route_release(rt);
+ 			return -EEXIST;
+ 		}
+ 	}
+ 
+-	list_add_rcu(&rt->list, &net->mctp.routes);
++	list_add_rcu(&rt->list, &net_mctp(net).routes);
+ 
+ 	return 0;
+ }
+@@ -1143,7 +1143,7 @@ static int mctp_route_remove(struct mctp_dev *mdev, mctp_eid_t daddr_start,
+ 
+ 	ASSERT_RTNL();
+ 
+-	list_for_each_entry_safe(rt, tmp, &net->mctp.routes, list) {
++	list_for_each_entry_safe(rt, tmp, &net_mctp(net).routes, list) {
+ 		if (rt->dev == mdev &&
+ 		    rt->min == daddr_start && rt->max == daddr_end &&
+ 		    rt->type == type) {
+@@ -1174,7 +1174,7 @@ void mctp_route_remove_dev(struct mctp_dev *mdev)
+ 	struct mctp_route *rt, *tmp;
+ 
+ 	ASSERT_RTNL();
+-	list_for_each_entry_safe(rt, tmp, &net->mctp.routes, list) {
++	list_for_each_entry_safe(rt, tmp, &net_mctp(net).routes, list) {
+ 		if (rt->dev == mdev) {
+ 			list_del_rcu(&rt->list);
+ 			/* TODO: immediate RTM_DELROUTE */
+@@ -1456,7 +1456,7 @@ static int mctp_dump_rtinfo(struct sk_buff *skb, struct netlink_callback *cb)
+ 	idx = 0;
+ 
+ 	rcu_read_lock();
+-	list_for_each_entry_rcu(rt, &net->mctp.routes, list) {
++	list_for_each_entry_rcu(rt, &net_mctp(net).routes, list) {
+ 		if (idx++ < s_idx)
+ 			continue;
+ 		if (mctp_fill_rtinfo(skb, rt,
+@@ -1475,7 +1475,7 @@ static int mctp_dump_rtinfo(struct sk_buff *skb, struct netlink_callback *cb)
+ /* net namespace implementation */
+ static int __net_init mctp_routes_net_init(struct net *net)
+ {
+-	struct netns_mctp *ns = &net->mctp;
++	struct netns_mctp *ns = &net_mctp(net);
+ 
+ 	INIT_LIST_HEAD(&ns->routes);
+ 	INIT_HLIST_HEAD(&ns->binds);
+@@ -1491,7 +1491,7 @@ static void __net_exit mctp_routes_net_exit(struct net *net)
+ 	struct mctp_route *rt;
+ 
+ 	rcu_read_lock();
+-	list_for_each_entry_rcu(rt, &net->mctp.routes, list)
++	list_for_each_entry_rcu(rt, &net_mctp(net).routes, list)
+ 		mctp_route_release(rt);
+ 	rcu_read_unlock();
+ }
+diff --git a/net/mctp/test/route-test.c b/net/mctp/test/route-test.c
+index 06c1897b685a..9eeabdfad7e5 100644
+--- a/net/mctp/test/route-test.c
++++ b/net/mctp/test/route-test.c
+@@ -55,7 +55,7 @@ static struct mctp_test_route *mctp_test_create_route(struct net *net,
+ 		mctp_dev_hold(dev);
+ 	rt->rt.dev = dev;
+ 
+-	list_add_rcu(&rt->rt.list, &net->mctp.routes);
++	list_add_rcu(&rt->rt.list, &net_mctp(net).routes);
+ 
+ 	return rt;
+ }
 diff --git a/net/mpls/af_mpls.c b/net/mpls/af_mpls.c
 index 3373b6b34dc7..a3e4c59c2c88 100644
 --- a/net/mpls/af_mpls.c
