@@ -909,6 +909,49 @@ index 763bf364a2a0..af029b991e1e 100644
  	ANDROID_OEM_DATA(1);
  };
  
+diff --git a/include/net/netfilter/nf_conntrack_extend.h b/include/net/netfilter/nf_conntrack_extend.h
+index 0b247248b032..87a1344faa58 100644
+--- a/include/net/netfilter/nf_conntrack_extend.h
++++ b/include/net/netfilter/nf_conntrack_extend.h
+@@ -16,6 +16,12 @@ enum nf_ct_ext_id {
+ #ifdef CONFIG_NF_CONNTRACK_EVENTS
+ 	NF_CT_EXT_ECACHE,
+ #endif
++#if IS_ENABLED(CONFIG_NETFILTER_SYNPROXY)
++	NF_CT_EXT_SYNPROXY,
++#endif
++#if IS_ENABLED(CONFIG_NET_ACT_CT)
++	NF_CT_EXT_ACT_CT,
++#endif
+ #ifdef CONFIG_NF_CONNTRACK_TIMESTAMP
+ 	NF_CT_EXT_TSTAMP,
+ #endif
+@@ -24,12 +30,6 @@ enum nf_ct_ext_id {
+ #endif
+ #ifdef CONFIG_NF_CONNTRACK_LABELS
+ 	NF_CT_EXT_LABELS,
+-#endif
+-#if IS_ENABLED(CONFIG_NETFILTER_SYNPROXY)
+-	NF_CT_EXT_SYNPROXY,
+-#endif
+-#if IS_ENABLED(CONFIG_NET_ACT_CT)
+-	NF_CT_EXT_ACT_CT,
+ #endif
+ 	NF_CT_EXT_NUM,
+ };
+diff --git a/include/net/netfilter/nf_conntrack_labels.h b/include/net/netfilter/nf_conntrack_labels.h
+index 6903f72bcc15..b9f03205a29c 100644
+--- a/include/net/netfilter/nf_conntrack_labels.h
++++ b/include/net/netfilter/nf_conntrack_labels.h
+@@ -39,7 +39,7 @@ static inline struct nf_conn_labels *nf_ct_labels_ext_add(struct nf_conn *ct)
+ #ifdef CONFIG_NF_CONNTRACK_LABELS
+ 	struct net *net = nf_ct_net(ct);
+ 
+-	if (atomic_read(&net->ct.labels_used) == 0)
++	if (atomic_read(&net->ct.nf_ct_proto.labels_used) == 0)
+ 		return NULL;
+ 
+ 	return nf_ct_ext_add(ct, NF_CT_EXT_LABELS, GFP_ATOMIC);
 diff --git a/include/net/netfilter/nf_tables.h b/include/net/netfilter/nf_tables.h
 index ee550229d4ff..1707fcb01a56 100644
 --- a/include/net/netfilter/nf_tables.h
@@ -931,6 +974,29 @@ index ee550229d4ff..1707fcb01a56 100644
  }
  
  #define NFT_GENMASK_ANY		((1 << 0) | (1 << 1))
+diff --git a/include/net/netns/conntrack.h b/include/net/netns/conntrack.h
+index bae914815aa3..4f54cdd6ce7d 100644
+--- a/include/net/netns/conntrack.h
++++ b/include/net/netns/conntrack.h
+@@ -88,6 +88,9 @@ struct nf_ip_net {
+ #ifdef CONFIG_NF_CT_PROTO_SCTP
+ 	struct nf_sctp_net	sctp;
+ #endif
++#if defined(CONFIG_NF_CONNTRACK_LABELS) //隔山打牛 ，借我个空洞
++	atomic_t		labels_used;
++#endif
+ #ifdef CONFIG_NF_CT_PROTO_GRE
+ 	struct nf_gre_net	gre;
+ #endif
+@@ -106,8 +109,5 @@ struct netns_ct {
+ 	struct ip_conntrack_stat __percpu *stat;
+ 	struct nf_ct_event_notifier __rcu *nf_conntrack_event_cb;
+ 	struct nf_ip_net	nf_ct_proto;
+-#if defined(CONFIG_NF_CONNTRACK_LABELS)
+-	atomic_t		labels_used;
+-#endif
+ };
+ #endif
 diff --git a/include/net/netns/ipv4.h b/include/net/netns/ipv4.h
 index 4248fbdf8e83..2da1f94e4e28 100644
 --- a/include/net/netns/ipv4.h
@@ -3256,6 +3322,28 @@ index 5ea7ab8bf4dc..c6d400aa2fe4 100644
  	}
  }
  
+diff --git a/net/netfilter/nf_conntrack_labels.c b/net/netfilter/nf_conntrack_labels.c
+index 6c46aad23313..6ca0b646dea7 100644
+--- a/net/netfilter/nf_conntrack_labels.c
++++ b/net/netfilter/nf_conntrack_labels.c
+@@ -65,7 +65,7 @@ int nf_connlabels_get(struct net *net, unsigned int bits)
+ 
+ 	BUILD_BUG_ON(NF_CT_LABELS_MAX_SIZE / sizeof(long) >= U8_MAX);
+ 
+-	v = atomic_inc_return_relaxed(&net->ct.labels_used);
++	v = atomic_inc_return_relaxed(&net->ct.nf_ct_proto.labels_used);
+ 	WARN_ON_ONCE(v <= 0);
+ 
+ 	return 0;
+@@ -74,7 +74,7 @@ EXPORT_SYMBOL_GPL(nf_connlabels_get);
+ 
+ void nf_connlabels_put(struct net *net)
+ {
+-	int v = atomic_dec_return_relaxed(&net->ct.labels_used);
++	int v = atomic_dec_return_relaxed(&net->ct.nf_ct_proto.labels_used);
+ 
+ 	WARN_ON_ONCE(v < 0);
+ }
 diff --git a/net/netfilter/nf_hooks_lwtunnel.c b/net/netfilter/nf_hooks_lwtunnel.c
 index 2d890dd04ff8..4758f842daf7 100644
 --- a/net/netfilter/nf_hooks_lwtunnel.c
