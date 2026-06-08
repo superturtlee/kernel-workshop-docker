@@ -626,6 +626,30 @@ index 7b106166a889..fbc1900288b7 100644
  #if defined(CONFIG_NET_SCHED) || defined(CONFIG_NET_XGRESS)
  	__u16			tc_index;	/* traffic control index */
  #endif
+diff --git a/include/linux/tcp.h b/include/linux/tcp.h
+index 3bbf355f9767..fcd349c63d9a 100644
+--- a/include/linux/tcp.h
++++ b/include/linux/tcp.h
+@@ -207,6 +207,9 @@ struct tcp_sock {
+ 	u32	reordering;	/* Packet reordering metric.		*/
+ 	u32	notsent_lowat;	/* TCP_NOTSENT_LOWAT */
+ 	u16	gso_segs;	/* Max number of segs per GSO packet	*/
++#if IS_ENABLED(CONFIG_MPTCP)
++	bool	is_mptcp;
++#endif
+ 	/* from STCP, retrans queue hinting */
+ 	struct sk_buff *lost_skb_hint;
+ 	struct sk_buff *retransmit_skb_hint;
+@@ -474,9 +477,6 @@ struct tcp_sock {
+ 	u32	mtu_info; /* We received an ICMP_FRAG_NEEDED / ICMPV6_PKT_TOOBIG
+ 			   * while socket was owned by user.
+ 			   */
+-#if IS_ENABLED(CONFIG_MPTCP)
+-	bool	is_mptcp;
+-#endif
+ #if IS_ENABLED(CONFIG_SMC)
+ 	bool	syn_smc;	/* SYN includes SMC */
+ 	bool	(*smc_hs_congested)(const struct sock *sk);
 diff --git a/include/net/ip6_fib.h b/include/net/ip6_fib.h
 index c4ca7efd9c6f..2b49ef991805 100644
 --- a/include/net/ip6_fib.h
@@ -1031,6 +1055,19 @@ index 742b070c9d42..e3ee58f1b0e1 100644
  	struct delayed_work	addr_chk_work;
  
  #ifdef CONFIG_IPV6_MROUTE
+diff --git a/include/net/netns/mib.h b/include/net/netns/mib.h
+index 7e373664b1e7..825e4b37f2df 100644
+--- a/include/net/netns/mib.h
++++ b/include/net/netns/mib.h
+@@ -24,7 +24,7 @@ struct netns_mib {
+ #if IS_ENABLED(CONFIG_TLS)
+ 	DEFINE_SNMP_STAT(struct linux_tls_mib, tls_statistics);
+ #endif
+-#ifdef CONFIG_MPTCP
++#ifdef CONFIG_DROPED_MPTCP
+ 	DEFINE_SNMP_STAT(struct mptcp_mib, mptcp_statistics);
+ #endif
+ 
 diff --git a/include/net/netns/netfilter.h b/include/net/netns/netfilter.h
 index b5caeda354be..56cdc9128db0 100644
 --- a/include/net/netns/netfilter.h
@@ -1107,6 +1144,32 @@ index 84e6b9fd5610..bdd0d31cd894 100644
  
  /* sctp mib definitions */
  enum {
+diff --git a/include/net/sock.h b/include/net/sock.h
+index e4aa08e0ea5c..e9546d02aa03 100644
+--- a/include/net/sock.h
++++ b/include/net/sock.h
+@@ -1294,11 +1294,6 @@ struct proto {
+ #ifdef CONFIG_PROC_FS
+ 	unsigned int		inuse_idx;
+ #endif
+-
+-#if IS_ENABLED(CONFIG_MPTCP)
+-	int			(*forward_alloc_get)(const struct sock *sk);
+-#endif
+-
+ 	bool			(*stream_memory_free)(const struct sock *sk, int wake);
+ 	bool			(*sock_is_readable)(struct sock *sk);
+ 	/* Memory pressure */
+@@ -1351,6 +1346,9 @@ struct proto {
+ 
+ 	struct list_head	node;
+ 	int			(*diag_destroy)(struct sock *sk, int err);
++#if IS_ENABLED(CONFIG_MPTCP)
++	int			(*forward_alloc_get)(const struct sock *sk);
++#endif
+ } __randomize_layout;
+ 
+ int proto_register(struct proto *prot, int alloc_slab);
 diff --git a/ipc/ipc_sysctl.c b/ipc/ipc_sysctl.c
 index 54318e0b4557..356bf62b373f 100644
 --- a/ipc/ipc_sysctl.c
@@ -2274,6 +2337,19 @@ index ee3c1b37d06c..2c2ac00b90c0 100644
  
  #ifdef CONFIG_KEYS
  	init_net.key_domain = &init_net_key_domain;
+diff --git a/net/ipv4/af_inet.c b/net/ipv4/af_inet.c
+index fbf366b240e2..e0a26803ef2a 100644
+--- a/net/ipv4/af_inet.c
++++ b/net/ipv4/af_inet.c
+@@ -1788,7 +1788,7 @@ static __net_exit void ipv4_mib_exit_net(struct net *net)
+ 	free_percpu(net->mib.tcp_statistics);
+ #ifdef CONFIG_MPTCP
+ 	/* allocated on demand, see mptcp_init_sock() */
+-	free_percpu(net->mib.mptcp_statistics);
++	free_percpu(net->mptcp_statistics);
+ #endif
+ }
+ 
 diff --git a/net/mctp/af_mctp.c b/net/mctp/af_mctp.c
 index 9a552569143b..f46a80c20e44 100644
 --- a/net/mctp/af_mctp.c
@@ -2969,6 +3045,86 @@ index 6e73da94af7f..99048b074856 100644
  		else
  			ttl = ipv6_hdr(skb)->hop_limit;
  		rt6 = dst_rt6_info(dst);
+diff --git a/net/mptcp/mib.c b/net/mptcp/mib.c
+index 19eb9292bd60..5e617123322f 100644
+--- a/net/mptcp/mib.c
++++ b/net/mptcp/mib.c
+@@ -94,7 +94,7 @@ bool mptcp_mib_alloc(struct net *net)
+ 	if (!mib)
+ 		return false;
+ 
+-	if (cmpxchg(&net->mib.mptcp_statistics, NULL, mib))
++	if (cmpxchg(&net->mptcp_statistics, NULL, mib))
+ 		free_percpu(mib);
+ 
+ 	return true;
+@@ -113,9 +113,9 @@ void mptcp_seq_show(struct seq_file *seq)
+ 	seq_puts(seq, "\nMPTcpExt:");
+ 
+ 	memset(sum, 0, sizeof(sum));
+-	if (net->mib.mptcp_statistics)
++	if (net->mptcp_statistics)
+ 		snmp_get_cpu_field_batch(sum, mptcp_snmp_list,
+-					 net->mib.mptcp_statistics);
++					 net->mptcp_statistics);
+ 
+ 	for (i = 0; mptcp_snmp_list[i].name; i++)
+ 		seq_printf(seq, " %lu", sum[i]);
+diff --git a/net/mptcp/mib.h b/net/mptcp/mib.h
+index 128282982843..c373e03cbca4 100644
+--- a/net/mptcp/mib.h
++++ b/net/mptcp/mib.h
+@@ -92,29 +92,29 @@ static inline void MPTCP_ADD_STATS(struct net *net,
+ 				   enum linux_mptcp_mib_field field,
+ 				   int val)
+ {
+-	if (likely(net->mib.mptcp_statistics))
+-		SNMP_ADD_STATS(net->mib.mptcp_statistics, field, val);
++	if (likely(net->mptcp_statistics))
++		SNMP_ADD_STATS(net->mptcp_statistics, field, val);
+ }
+ 
+ static inline void MPTCP_INC_STATS(struct net *net,
+ 				   enum linux_mptcp_mib_field field)
+ {
+-	if (likely(net->mib.mptcp_statistics))
+-		SNMP_INC_STATS(net->mib.mptcp_statistics, field);
++	if (likely(net->mptcp_statistics))
++		SNMP_INC_STATS(net->mptcp_statistics, field);
+ }
+ 
+ static inline void __MPTCP_INC_STATS(struct net *net,
+ 				     enum linux_mptcp_mib_field field)
+ {
+-	if (likely(net->mib.mptcp_statistics))
+-		__SNMP_INC_STATS(net->mib.mptcp_statistics, field);
++	if (likely(net->mptcp_statistics))
++		__SNMP_INC_STATS(net->mptcp_statistics, field);
+ }
+ 
+ static inline void MPTCP_DEC_STATS(struct net *net,
+ 				   enum linux_mptcp_mib_field field)
+ {
+-	if (likely(net->mib.mptcp_statistics))
+-		SNMP_DEC_STATS(net->mib.mptcp_statistics, field);
++	if (likely(net->mptcp_statistics))
++		SNMP_DEC_STATS(net->mptcp_statistics, field);
+ }
+ 
+ bool mptcp_mib_alloc(struct net *net);
+diff --git a/net/mptcp/protocol.c b/net/mptcp/protocol.c
+index 5ded0841b159..a29c980fbd6c 100644
+--- a/net/mptcp/protocol.c
++++ b/net/mptcp/protocol.c
+@@ -2916,7 +2916,7 @@ static int mptcp_init_sock(struct sock *sk)
+ 	if (!mptcp_is_enabled(net))
+ 		return -ENOPROTOOPT;
+ 
+-	if (unlikely(!net->mib.mptcp_statistics) && !mptcp_mib_alloc(net))
++	if (unlikely(!net->mptcp_statistics) && !mptcp_mib_alloc(net))
+ 		return -ENOMEM;
+ 
+ 	rcu_read_lock();
 diff --git a/net/netfilter/core.c b/net/netfilter/core.c
 index b9f551f02c81..adca1e9ad18a 100644
 --- a/net/netfilter/core.c
