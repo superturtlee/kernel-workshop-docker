@@ -627,7 +627,7 @@ index 7b106166a889..fbc1900288b7 100644
  	__u16			tc_index;	/* traffic control index */
  #endif
 diff --git a/include/linux/tcp.h b/include/linux/tcp.h
-index 3bbf355f9767..fcd349c63d9a 100644
+index 3bbf355f9767..b5d541b314cb 100644
 --- a/include/linux/tcp.h
 +++ b/include/linux/tcp.h
 @@ -207,6 +207,9 @@ struct tcp_sock {
@@ -640,7 +640,7 @@ index 3bbf355f9767..fcd349c63d9a 100644
  	/* from STCP, retrans queue hinting */
  	struct sk_buff *lost_skb_hint;
  	struct sk_buff *retransmit_skb_hint;
-@@ -474,9 +477,6 @@ struct tcp_sock {
+@@ -474,14 +477,24 @@ struct tcp_sock {
  	u32	mtu_info; /* We received an ICMP_FRAG_NEEDED / ICMPV6_PKT_TOOBIG
  			   * while socket was owned by user.
  			   */
@@ -650,6 +650,44 @@ index 3bbf355f9767..fcd349c63d9a 100644
  #if IS_ENABLED(CONFIG_SMC)
  	bool	syn_smc;	/* SYN includes SMC */
  	bool	(*smc_hs_congested)(const struct sock *sk);
+ #endif
+ 
++/* TCP fastopen related information */
++	struct tcp_fastopen_request *fastopen_req;
++	/* fastopen_rsk points to request_sock that resulted in this big
++	 * socket. Used to retransmit SYNACKs etc.
++	 */
++	struct request_sock __rcu *fastopen_rsk;
++	struct saved_syn *saved_syn;
++	union {
++		struct {
++	ANDROID_KABI_RESERVE(1);
++	ANDROID_OEM_DATA(1);
++		};
++		struct {
+ #if defined(CONFIG_TCP_MD5SIG) || defined(CONFIG_TCP_AO)
+ /* TCP AF-Specific parts; only used by TCP-AO/MD5 Signature support so far */
+ 	const struct tcp_sock_af_ops	*af_specific;
+@@ -494,17 +507,8 @@ struct tcp_sock {
+ 	struct tcp_ao_info	__rcu *ao_info;
+ #endif
+ #endif
+-
+-/* TCP fastopen related information */
+-	struct tcp_fastopen_request *fastopen_req;
+-	/* fastopen_rsk points to request_sock that resulted in this big
+-	 * socket. Used to retransmit SYNACKs etc.
+-	 */
+-	struct request_sock __rcu *fastopen_rsk;
+-	struct saved_syn *saved_syn;
+-
+-	ANDROID_KABI_RESERVE(1);
+-	ANDROID_OEM_DATA(1);
++		};
++	};
+ };
+ 
+ enum tsq_enum {
 diff --git a/include/net/ip6_fib.h b/include/net/ip6_fib.h
 index c4ca7efd9c6f..2b49ef991805 100644
 --- a/include/net/ip6_fib.h
@@ -726,7 +764,7 @@ index 28d59ae94ca3..dccf98be475d 100644
   * dropped on NETDEV_UNREGISTER events.
   *
 diff --git a/include/net/net_namespace.h b/include/net/net_namespace.h
-index 022ee2fc627c..80f2cd3b5669 100644
+index 022ee2fc627c..1687f24aa357 100644
 --- a/include/net/net_namespace.h
 +++ b/include/net/net_namespace.h
 @@ -57,7 +57,24 @@ struct bpf_prog;
@@ -796,7 +834,7 @@ index 022ee2fc627c..80f2cd3b5669 100644
  #if IS_ENABLED(CONFIG_CRYPTO_USER)
  	struct sock		*crypto_nlsk;
  #endif
-@@ -189,8 +190,37 @@ struct net {
+@@ -189,8 +190,38 @@ struct net {
  #if IS_ENABLED(CONFIG_SMC)
  	struct netns_smc	smc;
  #endif
@@ -809,6 +847,7 @@ index 022ee2fc627c..80f2cd3b5669 100644
 +		};
 +		struct {
 +			struct net_ext *ext;
++			__typeof__(struct mptcp_mib) __percpu *mptcp_statistics;
 +		};
 +	};
  } __randomize_layout;
