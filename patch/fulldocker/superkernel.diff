@@ -626,6 +626,34 @@ index 7b106166a889..fbc1900288b7 100644
  #if defined(CONFIG_NET_SCHED) || defined(CONFIG_NET_XGRESS)
  	__u16			tc_index;	/* traffic control index */
  #endif
+diff --git a/include/linux/skmsg.h b/include/linux/skmsg.h
+index 0b9095a281b8..ec770e706da8 100644
+--- a/include/linux/skmsg.h
++++ b/include/linux/skmsg.h
+@@ -89,11 +89,6 @@ struct sk_psock {
+ 	bool				redir_ingress; /* undefined if sk_redir is null */
+ 	struct sk_msg			*cork;
+ 	struct sk_psock_progs		progs;
+-#if IS_ENABLED(CONFIG_BPF_STREAM_PARSER)
+-	struct strparser		strp;
+-	u32				copied_seq;
+-	u32				ingress_bytes;
+-#endif
+ 	struct sk_buff_head		ingress_skb;
+ 	struct list_head		ingress_msg;
+ 	spinlock_t			ingress_lock;
+@@ -119,6 +114,11 @@ struct sk_psock {
+ 	struct delayed_work		work;
+ 	struct sock			*sk_pair;
+ 	struct rcu_work			rwork;
++#if IS_ENABLED(CONFIG_BPF_STREAM_PARSER)
++	struct strparser		strp;
++	u32				copied_seq;
++	u32				ingress_bytes;
++#endif
+ };
+ 
+ int sk_msg_alloc(struct sock *sk, struct sk_msg *msg, int len,
 diff --git a/include/linux/tcp.h b/include/linux/tcp.h
 index 3bbf355f9767..b5d541b314cb 100644
 --- a/include/linux/tcp.h
