@@ -11,6 +11,39 @@ index 5018db96c802..704bfff29334 100644
  	help
  	  This module provides kernel support for emulation of Windows NT
  	  synchronization primitives. It is not a hardware driver.
+diff --git a/include/linux/blk_types.h b/include/linux/blk_types.h
+index 86b821f71e6a..8ab2cd1fc19a 100644
+--- a/include/linux/blk_types.h
++++ b/include/linux/blk_types.h
+@@ -255,10 +255,6 @@ struct bio {
+ #endif
+ #endif
+ 
+-#if defined(CONFIG_BLK_DEV_INTEGRITY)
+-	struct bio_integrity_payload *bi_integrity; /* data integrity */
+-#endif
+-
+ 	unsigned short		bi_vcnt;	/* how many bio_vec's */
+ 
+ 	/*
+@@ -275,8 +271,16 @@ struct bio {
+ 
+ 	ANDROID_OEM_DATA(1);
+ 	ANDROID_KABI_RESERVE(1);
++	union{
++		struct{
+ 	ANDROID_KABI_RESERVE(2);
+-
++		};
++		struct{
++#if defined(CONFIG_BLK_DEV_INTEGRITY)
++	struct bio_integrity_payload *bi_integrity; /* data integrity */
++#endif
++		};
++	};
+ 	/*
+ 	 * We can inline a number of vecs at the end of the bio, to avoid
+ 	 * double allocations for a small number of bio_vecs. This member
 diff --git a/include/linux/blkdev.h b/include/linux/blkdev.h
 index 82de8f4f6fa3..95ccc25f7ee8 100644
 --- a/include/linux/blkdev.h
