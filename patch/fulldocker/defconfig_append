@@ -5,7 +5,7 @@ CONFIG_CGROUP_DEVICE=y
 CONFIG_CGROUP_PERF=y
 
 #内核参数 DOCKER支持，关闭v1控制器
-CONFIG_CMDLINE="console=ttynull stack_depot_disable=on cgroup_disable=pressure kasan.stacktrace=off kvm-arm.mode=protected bootconfig cgroup_no_v1=cpu,cpuset,io,memory"
+#CONFIG_CMDLINE="console=ttynull stack_depot_disable=on cgroup_disable=pressure kasan.stacktrace=off kvm-arm.mode=protected bootconfig cgroup_no_v1=cpu,cpuset,io,memory"
 #DROIDSPACES 支持
 CONFIG_PID_NS=y
 CONFIG_SYSVIPC=y
